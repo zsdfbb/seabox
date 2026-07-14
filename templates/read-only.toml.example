@@ -1,0 +1,14 @@
+# Sandbox-runtime configuration: read-only policy
+#
+# The sandbox only grants read access to the filesystem. All write
+# operations are blocked. Use this for analysis, review, or audit commands.
+
+[filesystem]
+policy = "read-only"
+
+[network]
+enabled = false
+
+[timeout]
+default_secs = 30
+max_secs = 300

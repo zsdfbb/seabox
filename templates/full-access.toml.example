@@ -1,0 +1,16 @@
+# Sandbox-runtime configuration: full-access policy
+#
+# WARNING: This policy bypasses all sandbox restrictions.
+# The command runs with full filesystem and network access.
+# Only use this for commands that require unrestricted system access,
+# or when sandboxing causes compatibility issues.
+
+[filesystem]
+policy = "full-access"
+
+[network]
+enabled = true
+
+[timeout]
+default_secs = 60
+max_secs = 600

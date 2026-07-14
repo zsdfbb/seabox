@@ -1,0 +1,21 @@
+# Sandbox-runtime configuration: workspace-write policy
+#
+# Copy this file to your project as .sandbox.toml and adjust paths.
+# The sandbox grants read access to the entire filesystem, and write
+# access only to the specified paths.
+
+[filesystem]
+# Workspace-write: full read access, write only to specified paths
+policy = "workspace"
+
+# Paths where write access is allowed (in addition to the working directory)
+# Supports ~ expansion for home directory
+allow_write = [".", "/tmp"]
+
+[network]
+# Network access is disabled by default in workspace-write mode
+enabled = false
+
+[timeout]
+default_secs = 30
+max_secs = 300

@@ -122,10 +122,10 @@ cargo build
 cargo build --release
 
 # 运行沙箱
-cargo run -- ls -la
-cargo run -- --policy read-only ls -la /
-cargo run -- --allow-network curl example.com
-cargo run -- --config .sandbox.toml cargo build
+cargo run -- run ls -la
+cargo run -- run --policy read-only ls -la /
+cargo run -- run --allow-network curl example.com
+cargo run -- run --config .sandbox.toml cargo build
 
 # 检查当前系统沙箱能力
 cargo run -- check
