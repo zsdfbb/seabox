@@ -307,7 +307,7 @@ Landlock 拒绝通常产生 `EPERM`（Operation not permitted）并伴有文件�
 | deny_read / allow_read 路径控制 | Phase 2 |
 | user_namespace / PID namespace | Phase 3 |
 | netns 网络隔离 | Phase 3 |
-| setrlimit 资源限制 | Phase 2 |
+| 自定义 seccomp 策略 | Phase 2 |
 | macOS backend (Seatbelt) | Phase 2 |
 | CodeWhale adapter | Phase 4 |
 | HTTP API (axum 服务器) | Phase 3 |
@@ -325,7 +325,7 @@ Phase 1 ────────────────────────
             ┌───────────────────────────┤
             ▼                           ▼
     Phase 2: macOS + deny_read    Phase 3: netns + HTTP API
-            + setrlimit                  + PID namespace
+            + 自定义 seccomp             + PID namespace
             │                           │
             └───────────┬───────────────┘
                         ▼

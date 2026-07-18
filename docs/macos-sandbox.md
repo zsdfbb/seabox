@@ -41,6 +41,5 @@ profile 以 SBPL 格式动态生成，根据配置的 allow/deny 路径注入
 | syscall 过滤 | 自定义 BPF | 仅 (deny default) + 显式 allow |
 | 网络粒度 | on/off (Phase 1) / eBPF 域名级 (未来) | on/off |
 | 进程隔离 | user_ns + (可选) PID_ns | 无对应 |
-| 资源限制 | setrlimit | setrlimit |
 
 macOS 网络隔离只到 on/off 粒度是 Seatbelt 的固有限制，跟 sandbox-runtime (TS) 行为一致。

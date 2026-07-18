@@ -35,7 +35,7 @@ Agent 类编程工具（Claude Code、CodeWhale、Cursor……）会代表用户
 |---|---|---|
 | 文件系统 | 独立 rootfs（镜像） | 共享宿主机 rootfs，Landlock ACL |
 | 进程视图 | 6 个 namespace（PID 1 隔离） | 共享 `/proc`（除非用 user_ns），内核边界 |
-| 资源 | cgroup v1/v2 | setrlimit + 可选 cgroup |
+| 资源 | cgroup v1/v2 | 共享宿主机资源限制（Agent 可信场景） |
 | 启动 | 数百毫秒 + 守护进程 | 几毫秒，单个静态二进制 |
 | 适用场景 | 不可信代码、多租户 | 可信 Agent 命令、防御性加固 |
 
@@ -74,7 +74,7 @@ sandbox-runtime-rs/
 │   │   ├── mod.rs              # LinuxSandbox 结构体 + dispatch
 │   │   ├── landlock.rs         # landlock_create_ruleset / add_rule / restrict_self
 │   │   ├── seccomp.rs          # 预编译 BPF 规则 + prctl 加载
-│   │   └── namespace.rs        # unshare(CLONE_NEW*) + setrlimit
+│   │   └── namespace.rs        # unshare(CLONE_NEWUSER/NEWNET) + netns 配置
 │   ├── macos/
 │   │   ├── mod.rs              # MacOsSandbox 结构体 + dispatch
 │   │   └── seatbelt.rs         # SBPL 模板生成 + sandbox-exec 包装
@@ -101,7 +101,7 @@ sandbox-runtime-rs/
 | `src/linux/mod.rs` | `LinuxSandbox` 结构体 + dispatch |
 | `src/linux/landlock.rs` | Landlock ruleset 构造 + restrict_self |
 | `src/linux/seccomp.rs` | BPF 规则生成 + `prctl` 加载 |
-| `src/linux/namespace.rs` | `unshare(CLONE_NEW*)` + setrlimit |
+| `src/linux/namespace.rs` | `unshare(CLONE_NEWUSER/NEWNET)` + netns 配置 |
 | `src/macos/mod.rs` | `MacOsSandbox` 结构体 + dispatch |
 | `src/macos/seatbelt.rs` | SBPL 模板 + sandbox-exec wrapper |
 | `src/integration/codewhale.rs` | CodeWhale `SandboxExecutor` adapter |

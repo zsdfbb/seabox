@@ -14,7 +14,6 @@
 | 网络阻断（本地） | `unshare(CLONE_NEWNET)` + lo down | 2.6.24+ |
 | 进程命名空间 | `unshare(CLONE_NEWPID)` *(可选, 见 future-extensions.md)* | 2.6.24+ |
 | 网络过滤（云容器，未来） | eBPF `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` + aya | 4.10+, cgroup v2 |
-| 资源限制 | `setrlimit` (RLIMIT_AS, RLIMIT_NPROC, RLIMIT_NOFILE) | 长期 |
 
 ## 环境适配策略
 
