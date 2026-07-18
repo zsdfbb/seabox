@@ -1,19 +1,18 @@
-# Sandbox-runtime configuration: workspace-write policy
+# sandbox-runtime 配置：workspace-write 策略
 #
-# Copy this file to your project as .sandbox.toml and adjust paths.
-# The sandbox grants read access to the entire filesystem, and write
-# access only to the specified paths.
+# 将该文件复制到你的项目下作为 .sandbox.toml 并按需调整路径。
+# 沙箱对整个文件系统授予读权限，仅对指定路径授予写权限。
 
 [filesystem]
-# Workspace-write: full read access, write only to specified paths
+# Workspace-write：完全读访问，仅向指定路径授予写权限
 policy = "workspace"
 
-# Paths where write access is allowed (in addition to the working directory)
-# Supports ~ expansion for home directory
+# 允许写入的路径（除工作目录之外）
+# 支持 ~ 展开为主目录
 allow_write = [".", "/tmp"]
 
 [network]
-# Network access is disabled by default in workspace-write mode
+# 在 workspace-write 模式下，网络访问默认关闭
 enabled = false
 
 [timeout]

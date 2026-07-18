@@ -1,19 +1,19 @@
-//! Linux sandbox implementation using Landlock + seccomp BPF.
+//! 基于 Landlock + seccomp BPF 的 Linux 沙箱实现。
 //!
-//! Provides [`LinuxSandbox`] which implements the [`Sandbox`] trait:
-//! filesystem access control via Landlock ACLs and syscall filtering
-//! via a hand-written seccomp BPF blacklist.
+//! 提供实现了 [`Sandbox`] trait 的 [`LinuxSandbox`]：
+//! 通过 Landlock ACL 做文件系统访问控制，通过手写的 seccomp BPF 黑名单
+//! 做系统调用过滤。
 //!
-//! ## Execution flow
+//! ## 执行流程
 //!
-//! 1. **Parent process** builds the Landlock ruleset (via `build_ruleset`)
-//!    and the seccomp BPF filter array.
-//! 2. **Parent process** calls `Command::spawn()` with a `pre_exec` closure.
-//! 3. **Child process** (fork → pre_exec → execve) applies:
+//! 1. **父进程** 构建 Landlock 规则集（经由 `build_ruleset`）以及
+//!    seccomp BPF filter 数组。
+//! 2. **父进程** 调用 `Command::spawn()` 并附带一个 `pre_exec` 闭包。
+//! 3. **子进程**（fork → pre_exec → execve）依次执行：
 //!    - `prctl(PR_SET_NO_NEW_PRIVS, 1, …)`
-//!    - `landlock_restrict_self(ruleset_fd, 0)` (if a ruleset exists)
+//!    - `landlock_restrict_self(ruleset_fd, 0)`（若存在规则集）
 //!    - `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)`
-//! 4. **Parent process** captures stdout/stderr and exit status.
+//! 4. **父进程** 捕获 stdout/stderr 与退出状态。
 
 pub mod landlock;
 pub mod seccomp;
@@ -32,60 +32,56 @@ use crate::{CommandOutput, CommandSpec, ExitReason, PreparedCommand, Sandbox};
 // LinuxSandbox
 // ---------------------------------------------------------------------------
 
-/// A Linux sandbox that enforces filesystem and syscall restrictions using
-/// Landlock ACLs and seccomp BPF filters.
+/// 使用 Landlock ACL 与 seccomp BPF filter 强制施加文件系统与系统调用限制
+/// 的 Linux 沙箱。
 #[derive(Debug)]
 pub struct LinuxSandbox {
     pub config: SandboxConfig,
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox trait implementation
+// Sandbox trait 实现
 // ---------------------------------------------------------------------------
 
 impl Sandbox for LinuxSandbox {
-    /// Execute a command inside the sandbox.
+    /// 在沙箱内执行一条命令。
     ///
-    /// Builds the Landlock ruleset and seccomp BPF filter in the **parent**
-    /// process, then applies both in the **child** via a `pre_exec` closure
-    /// (zero-allocation context).
+    /// 在**父进程**中构建 Landlock 规则集与 seccomp BPF filter，
+    /// 然后在**子进程**中通过 `pre_exec` 闭包（零分配上下文）施加两者。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput> {
-        // ── Step 1: Build Landlock ruleset and extract its fd ────────────
+        // ── 步骤 1：构建 Landlock 规则集并取出其 fd ────────────────────
         let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd(spec)?;
         let raw_ruleset_fd: i32 = ruleset_fd
             .as_ref()
             .map(|fd| fd.as_raw_fd())
             .unwrap_or(-1);
 
-        // ── Step 2: Build seccomp BPF filter ───────────────────────────
+        // ── 步骤 2：构建 seccomp BPF filter ───────────────────────────
         let bpf_filter = self.build_bpf_filter();
         let bpf_prog = seccomp::build_sock_fprog(&bpf_filter);
 
-        // ── Step 3: Expand ~ in cwd if needed ──────────────────────────
+        // ── 步骤 3：必要时在 cwd 中展开 ~ ─────────────────────────────
         let cwd = match spec.cwd.to_str() {
             Some(s) => PathBuf::from(crate::config::expand_tilde(s)),
             None => spec.cwd.clone(),
         };
 
-        // ── Step 4: Spawn child with pre_exec restrictions ─────────────
+        // ── 步骤 4：以 pre_exec 施加限制并 spawn 子进程 ───────────────
         //
-        // SAFETY for `pre_exec`:
+        // 关于 `pre_exec` 的 SAFETY：
         //
-        // The closure runs after `fork()` but before `execve()`.  We take
-        // extreme care to:
+        // 该闭包在 `fork()` 之后、`execve()` 之前执行。我们特别注意：
         //
-        // * Capture only `raw_ruleset_fd` (a plain `i32`) and `bpf_prog`
-        //   (a `sock_fprog` struct with `Send + Sync` via unsafe impl).
-        // * Not perform any heap allocation inside the closure.
-        // * Only call `libc::prctl`, `libc::syscall`, and `libc::close` —
-        //   all async-signal-safe.
+        // * 只捕获 `raw_ruleset_fd`（一个 `i32`）和 `bpf_prog`
+        //   （一个通过 unsafe impl 获得 `Send + Sync` 的 `sock_fprog`）。
+        // * 在闭包内不进行任何堆分配。
+        // * 仅调用 `libc::prctl`、`libc::syscall` 与 `libc::close` —
+        //   这些都是 async-signal-safe 的。
         //
-        // The `bpf_filter` Vec is **not** captured; it lives on the
-        // parent's stack and is only dropped after `spawn()` returns.
-        // After fork the child has its own COW copy of the stack frames,
-        // so the `bpf_prog.filter` pointer remains valid in the child's
-        // address space until `prctl` copies the program into kernel
-        // memory.
+        // `bpf_filter` 这个 `Vec` **不会**被捕获；它位于父进程的栈上，
+        // 直到 `spawn()` 返回后才被 drop。fork 后子进程拥有自己的 COW
+        // 栈帧副本，因此 `bpf_prog.filter` 指针在子进程地址空间中
+        // 仍然有效，直到 `prctl` 将程序拷入内核内存。
         let output = unsafe {
             std::process::Command::new(&spec.program)
                 .args(&spec.args)
@@ -95,30 +91,30 @@ impl Sandbox for LinuxSandbox {
                 .stderr(std::process::Stdio::piped())
                 .pre_exec(move || {
                     // -------------------------------------------------------
-                    // Step A: prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+                    // 步骤 A：prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
                     //
-                    // Required before SECCOMP_MODE_FILTER for
-                    // non-CAP_SYS_ADMIN processes.
+                    // 对于没有 CAP_SYS_ADMIN 的进程，在使用
+                    // SECCOMP_MODE_FILTER 之前必须设置。
                     // man:prctl(2) PR_SET_NO_NEW_PRIVS
                     // -------------------------------------------------------
-                    // SAFETY: All arguments are plain integers; the kernel
-                    // validates and returns an error code on failure.
+                    // SAFETY：参数都是普通整数；内核会校验并
+                    // 在失败时返回错误码。
                     let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
                     if ret != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
 
                     // -------------------------------------------------------
-                    // Step B: landlock_restrict_self(ruleset_fd, 0)
+                    // 步骤 B：landlock_restrict_self(ruleset_fd, 0)
                     //
-                    // Apply the Landlock ruleset to the current process.
-                    // Only called when a ruleset was created (not FullAccess).
+                    // 将 Landlock 规则集施加到当前进程。仅在已构建
+                    // 规则集（非 FullAccess）时调用。
                     // man:landlock_restrict_self(2)
                     // -------------------------------------------------------
                     if raw_ruleset_fd >= 0 {
-                        // SAFETY: `raw_ruleset_fd` is a valid fd from
-                        // `landlock_create_ruleset(2)` created by the parent.
-                        // The kernel validates access rights.
+                        // SAFETY：`raw_ruleset_fd` 是父进程经由
+                        // `landlock_create_ruleset(2)` 创建的有效 fd。
+                        // 内核会校验访问权限。
                         let ret = libc::syscall(
                             libc::SYS_landlock_restrict_self,
                             raw_ruleset_fd,
@@ -127,23 +123,22 @@ impl Sandbox for LinuxSandbox {
                         if ret != 0 {
                             return Err(std::io::Error::last_os_error());
                         }
-                        // Close the fd in the child; no longer needed.
+                        // 在子进程中关闭 fd，已经不再需要。
                         libc::close(raw_ruleset_fd);
                     }
 
                     // -------------------------------------------------------
-                    // Step C: prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
+                    // 步骤 C：prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)
                     //
-                    // Load the BPF blacklist filter.  Every subsequent syscall
-                    // is checked against this filter.
+                    // 加载 BPF 黑名单 filter。之后的每一次系统调用都会
+                    // 通过这个 filter 校验。
                     // man:prctl(2) PR_SET_SECCOMP
                     // -------------------------------------------------------
-                    // SAFETY: `bpf_prog` is a well-formed `sock_fprog` produced
-                    // by `build_sock_fprog`.  The backing filter data is valid
-                    // (the child's COW copy of `bpf_filter` still lives on the
-                    // parent's stack frame, accessible via the child's cloned
-                    // address space).  `prctl` copies the program into kernel
-                    // memory, so the pointer is only needed during the call.
+                    // SAFETY：`bpf_prog` 是由 `build_sock_fprog` 产出的
+                    // 良构 `sock_fprog`。其背后的 filter 数据有效
+                    // （`bpf_filter` 的子进程 COW 副本仍位于父进程栈帧上，
+                    // 可通过子进程克隆的地址空间访问）。`prctl` 会将程序
+                    // 拷入内核内存，调用结束后指针就不再需要。
                     let ret = libc::prctl(
                         libc::PR_SET_SECCOMP,
                         libc::SECCOMP_MODE_FILTER,
@@ -163,9 +158,9 @@ impl Sandbox for LinuxSandbox {
             .wait_with_output()
             .context("Failed to wait for sandboxed process")?;
 
-        // `ruleset_fd` is dropped here → fd closed in parent.
+        // `ruleset_fd` 在此 drop → fd 在父进程中关闭。
 
-        // ── Step 5: Convert output ────────────────────────────────────
+        // ── 步骤 5：转换输出 ────────────────────────────────────────
         Ok(CommandOutput {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
@@ -175,10 +170,9 @@ impl Sandbox for LinuxSandbox {
         })
     }
 
-    /// Prepare a [`CommandSpec`] for execution by resolving paths and
-    /// populating a [`PreparedCommand`].
+    /// 通过解析路径并填充 [`PreparedCommand`] 来准备执行一个 [`CommandSpec`]。
     ///
-    /// Does **not** spawn a process or apply any sandbox restrictions.
+    /// **不会** spawn 进程，也不会施加任何沙箱限制。
     fn prepare(&self, spec: &CommandSpec) -> anyhow::Result<PreparedCommand> {
         let mut command = vec![spec.program.clone()];
         command.extend(spec.args.clone());
@@ -196,29 +190,28 @@ impl Sandbox for LinuxSandbox {
         })
     }
 
-    /// Classify a completed command's exit code and stderr into an
-    /// [`ExitReason`].
+    /// 将已完成命令的退出码与 stderr 归类为一个 [`ExitReason`]。
     ///
-    /// Detection relies on:
+    /// 检测依据：
     ///
-    /// * **Exit code 31 or 159** → `SIGSYS` (seccomp killed the process).
-    ///   31 is a direct SIGSYS exit; 159 (128 + SIGSYS) is the shell convention
-    ///   for signal-killed processes on Unix.
-    /// * **Stderr patterns** → Landlock denial (`EPERM`/`EACCES`) or
-    ///   seccomp denial ("Bad system call", "SIGSYS", "seccomp").
-    /// * **Everything else** → normal program exit.
+    /// * **退出码 31 或 159** → `SIGSYS`（seccomp 杀死了进程）。
+    ///   31 是直接的 SIGSYS 退出；159（128 + SIGSYS）是 Unix shell
+    ///   表示被信号杀死的进程的习惯写法。
+    /// * **stderr 模式** → Landlock 拒绝（`EPERM`/`EACCES`）或
+    ///   seccomp 拒绝（"Bad system call"、"SIGSYS"、"seccomp"）。
+    /// * **其他情况** → 普通程序退出。
     fn classify_exit(&self, exit_code: i32, stderr: &str) -> ExitReason {
         use crate::DenyMechanism;
         use crate::ExitReason::*;
 
-        // Exit code 0 → success.
+        // 退出码 0 → 成功。
         if exit_code == 0 {
             return Ok;
         }
 
-        // Exit code 31 (direct) or 159 (128 + SIGSYS, Unix shell convention)
-        // → seccomp killed the process.  The kernel delivers SIGSYS when a
-        // seccomp filter returns KILL.
+        // 退出码 31（直接）或 159（128 + SIGSYS，Unix shell 习惯）
+        // → seccomp 杀死了进程。当 seccomp filter 返回 KILL 时，
+        // 内核会投递 SIGSYS。
         if exit_code == 31 || exit_code == 159 {
             return Denied {
                 mechanism: DenyMechanism::Seccomp,
@@ -228,8 +221,8 @@ impl Sandbox for LinuxSandbox {
 
         let lower = stderr.to_lowercase();
 
-        // ── Landlock denial patterns ───────────────────────────────────
-        // Landlock blocks filesystem operations with EACCES or EPERM.
+        // ── Landlock 拒绝模式 ───────────────────────────────────────
+        // Landlock 用 EACCES 或 EPERM 阻止文件系统操作。
         if lower.contains("operation not permitted")
             || lower.contains("permission denied")
             || lower.contains("eacces")
@@ -244,9 +237,9 @@ impl Sandbox for LinuxSandbox {
             };
         }
 
-        // ── Seccomp denial patterns ───────────────────────────────────
-        // seccomp filters signal through the audit log or stderr messages
-        // from libc/kernel.
+        // ── Seccomp 拒绝模式 ─────────────────────────────────────────
+        // seccomp filter 通过 audit log 或 libc/内核写到 stderr 的
+        // 消息来体现拦截。
         if lower.contains("bad system call")
             || lower.contains("sigsys")
             || lower.contains("seccomp")
@@ -260,27 +253,26 @@ impl Sandbox for LinuxSandbox {
             };
         }
 
-        // ── Normal program exit (non-zero) ─────────────────────────────
+        // ── 正常的程序退出（非零） ─────────────────────────────────
         Program(exit_code)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// 内部辅助函数
 // ---------------------------------------------------------------------------
 
 impl LinuxSandbox {
-    /// Build the Landlock ruleset and return its optional file descriptor.
+    /// 构建 Landlock 规则集并返回其可选的文件描述符。
     ///
-    /// * `FsPolicy::FullAccess` → returns `None` (no Landlock restrictions).
-    /// * Other policies → builds the ruleset via `landlock::build_ruleset`,
-    ///   then extracts the underlying `OwnedFd` from the `RulesetCreated`.
+    /// * `FsPolicy::FullAccess` → 返回 `None`（不施加 Landlock 限制）。
+    /// * 其他策略 → 通过 `landlock::build_ruleset` 构建规则集，
+    ///   然后从 `RulesetCreated` 取出底层的 `OwnedFd`。
     ///
-    /// The caller (our `execute` above) passes the raw fd into the
-    /// `pre_exec` closure where the child process calls
-    /// `landlock_restrict_self(2)`.
+    /// 调用方（即上面的 `execute`）将原始 fd 传入 `pre_exec` 闭包，
+    /// 由子进程调用 `landlock_restrict_self(2)`。
     fn prepare_ruleset_fd(&self, spec: &CommandSpec) -> anyhow::Result<Option<OwnedFd>> {
-        // Expand tilde in allow_write paths.
+        // 在 allow_write 路径中展开 ~。
         let allow_write: Vec<PathBuf> = self
             .config
             .filesystem
@@ -289,12 +281,12 @@ impl LinuxSandbox {
             .map(|p| PathBuf::from(crate::config::expand_tilde(p)))
             .collect();
 
-        // Build the ruleset (may return None for FullAccess).
+        // 构建规则集（FullAccess 时可能返回 None）。
         let created = landlock::build_ruleset(&spec.sandbox_policy, &allow_write, &spec.cwd)?;
 
-        // Extract the optional fd — consumes the RulesetCreated.
-        // `From<RulesetCreated> for Option<OwnedFd>` is defined in the
-        // landlock crate (ruleset.rs line 985).
+        // 取出可选的 fd —— 这会消费 RulesetCreated。
+        // `From<RulesetCreated> for Option<OwnedFd>` 在 landlock crate
+        // 中定义（ruleset.rs 第 985 行附近）。
         Ok(match created {
             Some(ruleset) => {
                 let fd: Option<OwnedFd> = ruleset.into();
@@ -304,10 +296,10 @@ impl LinuxSandbox {
         })
     }
 
-    /// Build the seccomp BPF blacklist filter.
+    /// 构建 seccomp BPF 黑名单 filter。
     ///
-    /// Returns a `Vec` of 19 `sock_filter` instructions (see
-    /// [`seccomp::build_blacklist_filter`] for details).
+    /// 返回一个包含 19 条 `sock_filter` 指令的 `Vec`
+    ///（详见 [`seccomp::build_blacklist_filter`]）。
     fn build_bpf_filter(&self) -> Vec<seccomp::sock_filter> {
         seccomp::build_blacklist_filter()
     }

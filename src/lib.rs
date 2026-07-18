@@ -1,9 +1,9 @@
-//! Core types and traits for sandbox-runtime.
+//! sandbox-runtime 的核心类型与 trait。
 //!
-//! This module defines the platform-agnostic abstractions:
-//! - [`Sandbox`] trait (the main abstraction over sandbox backends)
-//! - [`SandboxType`], [`FsPolicy`], [`DenyMechanism`], [`ExitReason`]
-//! - Command specifications: [`CommandSpec`], [`PreparedCommand`], [`CommandOutput`]
+//! 本模块定义平台无关的抽象：
+//! - [`Sandbox`] trait（沙箱后端的主要抽象）
+//! - [`SandboxType`]、[`FsPolicy`]、[`DenyMechanism`]、[`ExitReason`]
+//! - 命令规格：[`CommandSpec`]、[`PreparedCommand`]、[`CommandOutput`]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,33 +20,33 @@ pub mod linux;
 // SandboxType
 // ---------------------------------------------------------------------------
 
-/// Identifies which sandbox backend is in use.
+/// 标识当前使用的沙箱后端。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxType {
-    /// No sandbox enforcement.
+    /// 不启用任何沙箱。
     None,
-    /// Linux Landlock filesystem ACL (requires Linux 5.13+).
+    /// Linux Landlock 文件系统 ACL（需要 Linux 5.13+）。
     #[cfg(target_os = "linux")]
     LinuxLandlock,
 }
 
 // ---------------------------------------------------------------------------
-// FsPolicy (core type, also used by config)
+// FsPolicy（核心类型，也被 config 使用）
 // ---------------------------------------------------------------------------
 
-/// Filesystem access policy for the sandbox.
+/// 沙箱的文件系统访问策略。
 ///
-/// This is a core type that is also used by [`crate::config::FilesystemConfig`]
-/// and can be serialized/deserialized from TOML or JSON.
+/// 这是一个核心类型，同时被 [`crate::config::FilesystemConfig`] 使用，
+/// 可通过 TOML 或 JSON 序列化/反序列化。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "policy", rename_all = "kebab-case")]
 pub enum FsPolicy {
-    /// Allow full access to the filesystem (no Landlock rules).
+    /// 允许完全访问文件系统（不设置 Landlock 规则）。
     FullAccess,
-    /// Allow read-only access; write operations are blocked.
+    /// 允许只读访问；写操作会被阻止。
     ReadOnly,
-    /// Allow writes only to the workspace directory, /tmp, and explicitly
-    /// listed paths (see `allow_write` in [`crate::config::FilesystemConfig`]).
+    /// 仅允许对工作区目录、`/tmp` 以及显式列出的路径执行写操作
+    ///（见 [`crate::config::FilesystemConfig`] 中的 `allow_write`）。
     #[serde(rename = "workspace")]
     WorkspaceWrite,
 }
@@ -55,14 +55,14 @@ pub enum FsPolicy {
 // DenyMechanism
 // ---------------------------------------------------------------------------
 
-/// The kernel mechanism that denied a sandboxed operation.
+/// 拒绝沙箱化操作的内核机制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyMechanism {
-    /// Denied by Landlock (filesystem ACL).
+    /// 由 Landlock（文件系统 ACL）拒绝。
     Landlock,
-    /// Denied by seccomp (syscall filter).
+    /// 由 seccomp（系统调用过滤）拒绝。
     Seccomp,
-    /// Unknown or unrecognised mechanism.
+    /// 未知或无法识别的机制。
     Unknown,
 }
 
@@ -70,31 +70,31 @@ pub enum DenyMechanism {
 // ExitReason
 // ---------------------------------------------------------------------------
 
-/// Classifies the exit status of a sandboxed command.
+/// 对沙箱化命令退出状态的分类。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitReason {
-    /// Command exited successfully (exit code 0).
+    /// 命令正常退出（退出码 0）。
     Ok,
-    /// Command was denied by a sandbox mechanism.
+    /// 命令被沙箱机制拒绝。
     Denied {
-        /// Which mechanism denied the operation.
+        /// 触发拒绝的机制。
         mechanism: DenyMechanism,
-        /// Diagnostic message from the kernel / runtime.
+        /// 内核或运行时产生的诊断信息。
         message: String,
     },
-    /// Command exited with a non-zero exit code (not sandbox-related).
+    /// 命令以非零退出码退出（与沙箱无关）。
     Program(i32),
-    /// An internal error occurred (e.g. timeout, I/O error).
+    /// 发生了内部错误（如超时、I/O 错误）。
     InternalError(String),
 }
 
 impl ExitReason {
-    /// Returns `true` if the command was denied by the sandbox.
+    /// 若命令被沙箱拒绝则返回 `true`。
     pub fn is_denied(&self) -> bool {
         matches!(self, Self::Denied { .. })
     }
 
-    /// Returns `true` if the command exited successfully.
+    /// 若命令成功退出则返回 `true`。
     pub fn is_ok(&self) -> bool {
         matches!(self, Self::Ok)
     }
@@ -104,22 +104,22 @@ impl ExitReason {
 // CommandSpec
 // ---------------------------------------------------------------------------
 
-/// A fully-specified command to run inside the sandbox.
+/// 在沙箱内运行的完整命令规格。
 ///
-/// This is the input to [`Sandbox::prepare`] and [`Sandbox::execute`].
+/// 这是 [`Sandbox::prepare`] 和 [`Sandbox::execute`] 的输入。
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
-    /// The program to execute (path or name resolved via `PATH`).
+    /// 要执行的程序（路径或通过 `PATH` 解析的名称）。
     pub program: String,
-    /// Arguments passed to the program (without the program name).
+    /// 传递给程序的参数（不包含程序名本身）。
     pub args: Vec<String>,
-    /// Working directory for the command.
+    /// 命令的工作目录。
     pub cwd: PathBuf,
-    /// Environment variables for the command.
+    /// 命令使用的环境变量。
     pub env: HashMap<String, String>,
-    /// Maximum wall-clock time before the command is killed.
+    /// 命令在被杀死前的最大运行时间（wall-clock）。
     pub timeout: Duration,
-    /// Filesystem policy for this command.
+    /// 该命令的文件系统策略。
     pub sandbox_policy: FsPolicy,
 }
 
@@ -127,16 +127,16 @@ pub struct CommandSpec {
 // PreparedCommand
 // ---------------------------------------------------------------------------
 
-/// A command that has been prepared for execution (resolved paths, etc.).
+/// 已经为执行准备好的命令（路径已解析等）。
 #[derive(Debug, Clone)]
 pub struct PreparedCommand {
-    /// The full command line (program + args).
+    /// 完整的命令行（程序 + 参数）。
     pub command: Vec<String>,
-    /// Working directory for the command.
+    /// 命令的工作目录。
     pub cwd: PathBuf,
-    /// Environment variables for the command.
+    /// 命令使用的环境变量。
     pub env: HashMap<String, String>,
-    /// Maximum wall-clock time before the command is killed.
+    /// 命令在被杀死前的最大运行时间（wall-clock）。
     pub timeout: Duration,
 }
 
@@ -144,14 +144,14 @@ pub struct PreparedCommand {
 // CommandOutput
 // ---------------------------------------------------------------------------
 
-/// The result of executing a sandboxed command.
+/// 执行沙箱化命令的结果。
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
-    /// Standard output captured from the command.
+    /// 从命令捕获的标准输出。
     pub stdout: String,
-    /// Standard error captured from the command.
+    /// 从命令捕获的标准错误。
     pub stderr: String,
-    /// Exit code of the command.
+    /// 命令的退出码。
     pub exit_code: i32,
 }
 
@@ -159,21 +159,19 @@ pub struct CommandOutput {
 // Sandbox trait
 // ---------------------------------------------------------------------------
 
-/// Platform-agnostic sandbox abstraction.
+/// 与平台无关的沙箱抽象。
 ///
-/// Implementations provide filesystem isolation and syscall filtering
-/// using the kernel mechanisms available on the target platform
-/// (e.g. Landlock + seccomp on Linux, Seatbelt on macOS).
+/// 各实现使用目标平台上可用的内核机制来提供文件系统隔离与系统调用过滤
+///（例如 Linux 上的 Landlock + seccomp、macOS 上的 Seatbelt）。
 pub trait Sandbox: Send + Sync {
-    /// Prepare a [`CommandSpec`] for execution, resolving paths and
-    /// building the sandbox ruleset where possible before spawning.
+    /// 准备一个 [`CommandSpec`] 以便执行，解析路径并在可以的情况下
+    /// 预先构建沙箱规则集。
     fn prepare(&self, spec: &CommandSpec) -> anyhow::Result<PreparedCommand>;
 
-    /// Execute a command under sandbox restrictions and return its output.
+    /// 在沙箱限制下执行命令，并返回其输出。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput>;
 
-    /// Classify the exit code and stderr of a completed command into an
-    /// [`ExitReason`], detecting sandbox denials (Landlock, seccomp, etc.)
-    /// vs. normal program exits vs. internal errors.
+    /// 将已完成命令的退出码与 stderr 归类为一个 [`ExitReason`]，
+    /// 区分沙箱拒绝（Landlock、seccomp 等）、正常程序退出与内部错误。
     fn classify_exit(&self, exit_code: i32, stderr: &str) -> ExitReason;
 }

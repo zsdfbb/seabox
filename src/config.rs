@@ -1,9 +1,9 @@
-//! Sandbox configuration parsing and builder.
+//! 沙箱配置解析与 Builder。
 //!
-//! Provides [`SandboxConfig`] (deserialisable from TOML), a [`SandboxConfigBuilder`],
-//! and the [`expand_tilde`] utility for path expansion.
+//! 提供 [`SandboxConfig`]（可从 TOML 反序列化）、[`SandboxConfigBuilder`]，
+//! 以及用于路径展开的 [`expand_tilde`] 工具函数。
 //!
-//! ## TOML Example
+//! ## TOML 示例
 //!
 //! ```toml
 //! [filesystem]
@@ -28,10 +28,10 @@ use crate::FsPolicy;
 // SandboxConfig
 // ---------------------------------------------------------------------------
 
-/// Complete sandbox configuration.
+/// 完整的沙箱配置。
 ///
-/// Deserialisable from TOML. Constructed directly, via [`SandboxConfig::from_toml`],
-/// or through the [`SandboxConfig::builder`] fluent API.
+/// 可从 TOML 反序列化。可直接构造、通过 [`SandboxConfig::from_toml`] 加载，
+/// 或通过 [`SandboxConfig::builder`] 流式 API 构造。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SandboxConfig {
     #[serde(default)]
@@ -43,14 +43,14 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
-    /// Load a [`SandboxConfig`] from a TOML file on disk.
+    /// 从磁盘上的 TOML 文件加载一个 [`SandboxConfig`]。
     pub fn from_toml(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref())?;
         let config: SandboxConfig = toml::from_str(&content)?;
         Ok(config)
     }
 
-    /// Create a [`SandboxConfigBuilder`] for programmatic construction.
+    /// 创建一个用于程序化构造的 [`SandboxConfigBuilder`]。
     pub fn builder() -> SandboxConfigBuilder {
         SandboxConfigBuilder::default()
     }
@@ -60,9 +60,9 @@ impl SandboxConfig {
 // SandboxConfigBuilder
 // ---------------------------------------------------------------------------
 
-/// Fluent builder for [`SandboxConfig`].
+/// 用于 [`SandboxConfig`] 的流式 Builder。
 ///
-/// # Example
+/// # 示例
 ///
 /// ```ignore
 /// use sandbox_runtime::config::SandboxConfig;
@@ -97,35 +97,35 @@ impl Default for SandboxConfigBuilder {
 }
 
 impl SandboxConfigBuilder {
-    /// Set the filesystem policy.
+    /// 设置文件系统策略。
     pub fn policy(mut self, policy: FsPolicy) -> Self {
         self.policy = Some(policy);
         self
     }
 
-    /// Set additional writable paths (in addition to workspace and /tmp).
+    /// 设置额外的可写路径（追加在工作区目录与 `/tmp` 之外）。
     pub fn allow_write(mut self, paths: impl Into<Vec<String>>) -> Self {
         self.allow_write = paths.into();
         self
     }
 
-    /// Enable or disable network access (Phase 1: placeholder only).
+    /// 启用或禁用网络访问（Phase 1：仅占位）。
     pub fn network_enabled(mut self, enabled: bool) -> Self {
         self.network_enabled = enabled;
         self
     }
 
-    /// Set both default and maximum timeout (in seconds).
+    /// 同时设置默认与最大超时（秒）。
     ///
-    /// `default_secs` is the timeout applied when the caller does not specify one.
-    /// `max_secs` is the hard upper bound the sandbox will accept.
+    /// `default_secs` 是调用方未指定时使用的超时；`max_secs` 是沙箱接受
+    /// 的硬性上限。
     pub fn timeout(mut self, default_secs: u64, max_secs: u64) -> Self {
         self.timeout_default_secs = default_secs;
         self.timeout_max_secs = max_secs;
         self
     }
 
-    /// Consume the builder and produce a [`SandboxConfig`].
+    /// 消费 Builder 并产出一个 [`SandboxConfig`]。
     pub fn build(self) -> SandboxConfig {
         SandboxConfig {
             filesystem: FilesystemConfig {
@@ -147,11 +147,10 @@ impl SandboxConfigBuilder {
 // FilesystemConfig
 // ---------------------------------------------------------------------------
 
-/// Filesystem access configuration for the sandbox.
+/// 沙箱的文件系统访问配置。
 ///
-/// The `policy` field controls the broad access mode. `allow_write` lists
-/// additional paths (beyond the workspace directory and `/tmp`) that the
-/// sandboxed process may write to.
+/// `policy` 字段控制粗粒度的访问模式；`allow_write` 列出
+///（除工作区目录与 `/tmp` 之外）沙箱化进程允许写入的路径。
 ///
 /// # TOML
 ///
@@ -162,16 +161,16 @@ impl SandboxConfigBuilder {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemConfig {
-    /// Access policy preset.
+    /// 访问策略预设。
     ///
-    /// `#[serde(flatten)]` inlines the `FsPolicy` tag so that TOML writes
-    /// `policy = "read-only"` directly instead of a nested `[filesystem.policy]`.
+    /// `#[serde(flatten)]` 将 `FsPolicy` 的 tag 内联展开，使得 TOML 直接写成
+    /// `policy = "read-only"`，而不是嵌套在 `[filesystem.policy]` 中。
     #[serde(flatten)]
     pub policy: FsPolicy,
 
-    /// Additional write-allowed paths (in addition to workspace dir and `/tmp`).
+    /// 额外的可写路径（除工作区目录与 `/tmp` 之外）。
     ///
-    /// Paths are stored as strings and support `~` expansion at runtime.
+    /// 路径以字符串形式存储，运行时支持 `~` 展开。
     #[serde(default)]
     pub allow_write: Vec<String>,
 }
@@ -189,12 +188,12 @@ impl Default for FilesystemConfig {
 // NetworkConfig
 // ---------------------------------------------------------------------------
 
-/// Network access configuration.
+/// 网络访问配置。
 ///
-/// Phase 1: this is a placeholder. Network sandboxing is not yet implemented.
+/// Phase 1：这是占位实现。网络沙箱化尚未实现。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    /// Whether network access is enabled.
+    /// 是否启用网络访问。
     #[serde(default)]
     pub enabled: bool,
 }
@@ -203,13 +202,13 @@ pub struct NetworkConfig {
 // TimeoutConfig
 // ---------------------------------------------------------------------------
 
-/// Timeout configuration for sandboxed commands.
+/// 沙箱化命令的超时配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutConfig {
-    /// Default command timeout in seconds.
+    /// 默认命令超时（秒）。
     #[serde(default = "default_timeout")]
     pub default_secs: u64,
-    /// Maximum allowed command timeout in seconds.
+    /// 允许的最大命令超时（秒）。
     #[serde(default = "default_max_timeout")]
     pub max_secs: u64,
 }
@@ -235,12 +234,11 @@ fn default_max_timeout() -> u64 {
 // expand_tilde
 // ---------------------------------------------------------------------------
 
-/// Expand a leading `~` or `~/` in a path string to the user's home directory.
+/// 将路径字符串开头的 `~` 或 `~/` 展开为用户主目录。
 ///
-/// If `$HOME` is not set (unusual on Linux/macOS), the string is returned
-/// unchanged.
+/// 若 `$HOME` 未设置（在 Linux/macOS 上罕见），则原样返回字符串。
 ///
-/// # Examples
+/// # 示例
 ///
 /// ```
 /// use sandbox_runtime::config::expand_tilde;
@@ -249,7 +247,7 @@ fn default_max_timeout() -> u64 {
 /// assert!(!expanded.starts_with("~/"));
 /// assert!(expanded.ends_with("/projects"));
 ///
-/// // Absolute paths pass through unchanged.
+/// // 绝对路径原样返回。
 /// assert_eq!(expand_tilde("/tmp"), "/tmp");
 /// ```
 pub fn expand_tilde(s: &str) -> String {
@@ -262,7 +260,7 @@ pub fn expand_tilde(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// 测试
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -289,10 +287,10 @@ mod tests {
         let just_tilde = expand_tilde("~");
         assert!(!just_tilde.starts_with('~'), "bare tilde should expand");
 
-        // Absolute paths pass through unchanged.
+        // 绝对路径原样返回。
         assert_eq!(expand_tilde("/tmp/foo"), "/tmp/foo");
 
-        // Paths without leading tilde pass through.
+        // 不以 ~ 开头的路径原样返回。
         assert_eq!(expand_tilde("relative/path"), "relative/path");
     }
 
@@ -349,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_toml_roundtrip() {
-        // Serialise a config to TOML and deserialise it back.
+        // 将 config 序列化为 TOML，再反序列化回来。
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 policy: FsPolicy::WorkspaceWrite,
@@ -375,8 +373,8 @@ mod tests {
 
     #[test]
     fn test_toml_deserialize_flattened_policy() {
-        // Verify that the flattened `policy` tag works: `policy = "read-only"` at
-        // the `[filesystem]` level, not inside a nested `[filesystem.policy]`.
+        // 验证被 flatten 的 `policy` tag：应在 `[filesystem]` 顶层写
+        // `policy = "read-only"`，而不是嵌套的 `[filesystem.policy]`。
         let toml_str = r#"
 [filesystem]
 policy = "read-only"
@@ -419,12 +417,12 @@ policy = "invalid-policy"
 
     #[test]
     fn test_tilde_in_builder_paths() {
-        // Builder stores paths as-is; expansion is a runtime concern.
+        // Builder 原样存储路径；展开是运行时的职责。
         let config = SandboxConfig::builder()
             .allow_write(vec!["~/workspace".to_string()])
             .build();
         assert_eq!(config.filesystem.allow_write, vec!["~/workspace"]);
-        // expand_tilde at runtime
+        // 运行时调用 expand_tilde
         let expanded = expand_tilde(&config.filesystem.allow_write[0]);
         assert!(!expanded.starts_with("~/"));
         assert!(expanded.ends_with("/workspace"));

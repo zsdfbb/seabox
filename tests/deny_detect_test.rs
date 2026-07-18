@@ -1,18 +1,17 @@
-//! Integration tests for LinuxSandbox::classify_exit().
+//! LinuxSandbox::classify_exit() 的集成测试。
 //!
-//! Tests all boundary cases: exit code 0, SIGSYS signals (31, 159),
-//! Landlock denial patterns in stderr, seccomp denial patterns, and
-//! normal program exits.
+//! 覆盖所有边界情况：退出码 0、SIGSYS 信号（31, 159）、
+//! stderr 中的 Landlock 拒绝模式、seccomp 拒绝模式以及普通程序退出。
 
-// This file only compiles on Linux because it depends on
-// `sandbox_runtime::linux::LinuxSandbox`.
+// 本文件仅在 Linux 下编译，因为它依赖
+// `sandbox_runtime::linux::LinuxSandbox`。
 #![cfg(target_os = "linux")]
 
 use sandbox_runtime::config::SandboxConfig;
 use sandbox_runtime::linux::LinuxSandbox;
 use sandbox_runtime::{DenyMechanism, ExitReason, Sandbox};
 
-/// Helper: create a default-configured LinuxSandbox for classify_exit tests.
+/// 辅助函数：创建一个默认配置的 LinuxSandbox 用于 classify_exit 测试。
 fn make_sandbox() -> LinuxSandbox {
     LinuxSandbox {
         config: SandboxConfig::default(),
@@ -20,7 +19,7 @@ fn make_sandbox() -> LinuxSandbox {
 }
 
 // ---------------------------------------------------------------------------
-// exit_code = 0 → Ok (regardless of stderr content)
+// exit_code = 0 → Ok（与 stderr 内容无关）
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -31,7 +30,7 @@ fn exit_zero_ok() {
 }
 
 // ---------------------------------------------------------------------------
-// SIGSYS exit codes → Denied(Seccomp)
+// SIGSYS 退出码 → Denied(Seccomp)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -61,7 +60,7 @@ fn exit_159_seccomp_shell() {
 }
 
 // ---------------------------------------------------------------------------
-// Landlock denial patterns in stderr (exit_code = 1)
+// stderr 中的 Landlock 拒绝模式（exit_code = 1）
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -93,7 +92,7 @@ fn stderr_permission_denied() {
 }
 
 // ---------------------------------------------------------------------------
-// Seccomp denial patterns in stderr (exit_code = 1)
+// stderr 中的 seccomp 拒绝模式（exit_code = 1）
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -136,7 +135,7 @@ fn stderr_seccomp() {
 }
 
 // ---------------------------------------------------------------------------
-// No match → Program(exit_code)
+// 没有匹配 → Program(exit_code)
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -1,13 +1,13 @@
-//! Integration tests for SandboxConfig: TOML deserialization, Builder construction,
-//! expand_tilde, invalid policy rejection, partial TOML defaults, and round-trip.
+//! SandboxConfig 的集成测试：TOML 反序列化、Builder 构造、
+//! expand_tilde、无效策略拒绝、部分 TOML 默认值，以及往返一致性。
 //!
-//! These tests exercise the external `sandbox_runtime::config` API surface.
+//! 这些测试覆盖公开的 `sandbox_runtime::config` API。
 
 use sandbox_runtime::config::SandboxConfig;
 use sandbox_runtime::FsPolicy;
 
 // ---------------------------------------------------------------------------
-// TOML → SandboxConfig deserialization (three policy variants)
+// TOML → SandboxConfig 反序列化（三种策略变体）
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -19,7 +19,7 @@ policy = "full-access"
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.filesystem.policy, FsPolicy::FullAccess);
     assert!(config.filesystem.allow_write.is_empty());
-    // Defaults for unspecified sections
+    // 未指定 section 的默认值
     assert!(!config.network.enabled);
     assert_eq!(config.timeout.default_secs, 30);
     assert_eq!(config.timeout.max_secs, 300);
@@ -52,7 +52,7 @@ allow_write = ["/data", "/var/log"]
 }
 
 // ---------------------------------------------------------------------------
-// Builder → SandboxConfig construction, matching TOML deserialization
+// Builder → SandboxConfig 构造，与 TOML 反序列化等价
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -108,23 +108,23 @@ fn test_expand_tilde() {
     assert!(!expanded.starts_with("~/"));
     assert!(expanded.ends_with("/projects"));
 
-    // bare ~ → $HOME
+    // 单独的 ~ → $HOME
     let bare = sandbox_runtime::config::expand_tilde("~");
     assert!(!bare.starts_with('~'), "bare tilde should expand");
 
-    // ~otheruser stays unchanged (only leading ~/ or bare ~ are expanded)
+    // ~otheruser 保持不变（只有开头的 ~/ 或单独的 ~ 会被展开）
     assert_eq!(
         sandbox_runtime::config::expand_tilde("~otheruser"),
         "~otheruser"
     );
 
-    // Absolute path without tilde → unchanged
+    // 不含 ~ 的绝对路径 → 原样
     assert_eq!(
         sandbox_runtime::config::expand_tilde("/absolute/path"),
         "/absolute/path"
     );
 
-    // Relative path without tilde → unchanged
+    // 不含 ~ 的相对路径 → 原样
     assert_eq!(
         sandbox_runtime::config::expand_tilde("relative/path"),
         "relative/path"
@@ -132,7 +132,7 @@ fn test_expand_tilde() {
 }
 
 // ---------------------------------------------------------------------------
-// Invalid policy value rejected by serde
+// 无效的策略值会被 serde 拒绝
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -151,7 +151,7 @@ policy = "invalid-policy"
 }
 
 // ---------------------------------------------------------------------------
-// Partial TOML (only [filesystem]) uses defaults for [network] and [timeout]
+// 部分 TOML（只有 [filesystem]）时 [network] 与 [timeout] 使用默认值
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -162,14 +162,14 @@ policy = "full-access"
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.filesystem.policy, FsPolicy::FullAccess);
-    // Default values for unspecified sections
+    // 未指定 section 的默认值
     assert!(!config.network.enabled);
     assert_eq!(config.timeout.default_secs, 30);
     assert_eq!(config.timeout.max_secs, 300);
 }
 
 // ---------------------------------------------------------------------------
-// TOML round-trip: serialise → deserialise → values unchanged
+// TOML 往返：序列化 → 反序列化 → 值不变
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -1,45 +1,45 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件为 Claude Code (claude.ai/code) 在本仓库工作时提供指引。
 
-## Project Overview
+## 项目概述
 
-A **standalone** Rust sandbox tool that enforces filesystem and process restrictions on arbitrary commands at the OS level, without requiring a container runtime. Targets Linux (Landlock + seccomp + user_namespace) and macOS (Seatbelt).
+一个**独立**的 Rust 沙箱工具，在 OS 层面强制对任意命令施加文件系统与进程限制，**无需容器运行时**。目标平台：Linux（Landlock + seccomp + user_namespace）与 macOS（Seatbelt）。
 
-### Motivation
+### 动机
 
-Agentic coding tools (Claude Code, CodeWhale, Cursor, …) routinely invoke shell commands and edit files on the user's behalf. Permission prompts alone are not enough — they fatigue the user, who then clicks "allow" reflexively. A **kernel-level sandbox** enforces policy declaratively: most commands run without interruption, dangerous ones are blocked outright, only edge cases surface a prompt. Anthropic shipped `@anthropic-ai/sandbox-runtime` for Claude Code; this project is the **Agent-agnostic, Rust-native, zero-external-dependency** equivalent that any Agent can embed.
+Agent 类编程工具（Claude Code、CodeWhale、Cursor……）会代表用户频繁执行 shell 命令、修改文件。仅靠权限弹窗并不够——它会让用户疲劳，最终形成"看见就点允许"的肌肉记忆。**内核级沙箱**以声明式方式强制执行策略：大多数命令无感放行，危险命令直接阻断，仅边缘情况弹窗。Anthropic 为 Claude Code 发布了 `@anthropic-ai/sandbox-runtime`；本项目是其**Agent 无关、Rust 原生、零外部依赖**的等价实现，任何 Agent 都可嵌入。
 
-### Target Users
+### 目标用户
 
-- Agent runtimes that need a sandbox backend (CodeWhale, Claude Code, custom)
-- Local CI runners that want lightweight command isolation without Docker
-- Developers who want to wrap risky shell commands with declarative policy
+- 需要沙箱后端的 Agent 运行时（CodeWhale、Claude Code、自研）
+- 希望对命令做轻量隔离但又不想引入 Docker 的本地 CI runner
+- 希望用声明式策略封装高风险 shell 命令的开发者
 
-### Positioning
+### 定位
 
 | 对比项 | sandbox-runtime (TS) | CodeWhale sandbox (Rust) | sandbox-runtime-rs (目标) |
 |---|---|---|---|
-| Linux 方案 | bwrap | Landlock (标记态) + 可选 bwrap | **Landlock + seccomp + user_namespace, 零外部依赖** |
+| Linux 方案 | bwrap | Landlock（标记态） + 可选 bwrap | **Landlock + seccomp + user_namespace，零外部依赖** |
 | 集成方式 | CLI wrap | 内嵌模块 | **CLI + crate + HTTP API** |
 | 网络策略 | 代理级域名过滤 | 仅标记 | **netns 全阻断或全放通** |
 | macOS 方案 | sandbox-exec | sandbox-exec | sandbox-exec（Seatbelt profile） |
 | 分发 | npm | 随 CodeWhale 发布 | **crates.io + 静态二进制** |
 | Agent 绑定 | Claude Code | CodeWhale | **Agent 无关** |
 
-### Relationship to Docker
+### 与 Docker 的关系
 
-This tool is **not** a Docker replacement. It occupies a different point on the isolation/overhead curve:
+本工具**不是** Docker 的替代品，它处在隔离强度/开销曲线上的不同位置：
 
 | | Docker | sandbox-runtime-rs |
 |---|---|---|
-| File system | Independent rootfs (image) | Shares host rootfs, Landlock ACL |
-| Process view | 6 namespaces (PID 1 isolated) | Same `/proc` (unless user_ns), kernel boundaries |
-| Resources | cgroup v1/v2 | setrlimit + optional cgroup |
-| Startup | Hundreds of ms + daemon | Few ms, single static binary |
-| Use case | Untrusted code, multi-tenant | Trusted Agent commands, defensive depth |
+| 文件系统 | 独立 rootfs（镜像） | 共享宿主机 rootfs，Landlock ACL |
+| 进程视图 | 6 个 namespace（PID 1 隔离） | 共享 `/proc`（除非用 user_ns），内核边界 |
+| 资源 | cgroup v1/v2 | setrlimit + 可选 cgroup |
+| 启动 | 数百毫秒 + 守护进程 | 几毫秒，单个静态二进制 |
+| 适用场景 | 不可信代码、多租户 | 可信 Agent 命令、防御性加固 |
 
-Use Docker when running genuinely untrusted code; use sandbox-runtime-rs when constraining a trusted Agent.
+运行真正不可信的代码时用 Docker；约束可信 Agent 时用 sandbox-runtime-rs。
 
 ## Documentation Index
 
@@ -80,8 +80,10 @@ sandbox-runtime-rs/
 │   │   └── seatbelt.rs         # SBPL 模板生成 + sandbox-exec 包装
 │   ├── integration/
 │   │   └── codewhale.rs        # → codewhale::sandbox::SandboxExecutor
-│   └── api/
-│       └── http.rs             # axum 服务器, POST /v1/sandbox/run
+│   ├── api/
+│   │   └── http.rs             # axum 服务器, POST /v1/sandbox/run
+│   └── bin/
+│       └── syscall_probe.rs    # seccomp 测试辅助二进制：直接调用任意 syscall
 ├── tests/                      # 集成测试（需要真实内核能力）
 ├── examples/                   # 可运行示例 binary
 └── templates/                  # TOML 配置样板（用户复制、examples 引用）
@@ -104,9 +106,11 @@ sandbox-runtime-rs/
 | `src/macos/seatbelt.rs` | SBPL 模板 + sandbox-exec wrapper |
 | `src/integration/codewhale.rs` | CodeWhale `SandboxExecutor` adapter |
 | `src/api/http.rs` | axum 服务器（OpenSandbox v1 兼容） |
-| `tests/landlock_test.rs` | Landlock 实际行为测试（需要 5.13+） |
+| `tests/landlock_test.rs` | Landlock 实际行为测试（库 API + CLI 二进制，需要 5.13+） |
+| `tests/seccomp_test.rs` | seccomp 黑名单 13 个 syscall 端到端测试（CLI 二进制） |
 | `tests/deny_detect_test.rs` | 拒绝检测模式匹配测试 |
 | `tests/config_test.rs` | 配置解析测试 |
+| `src/bin/syscall_probe.rs` | seccomp 测试辅助二进制：直接调用任意 syscall 编号 |
 | `examples/cli_basic.rs` | CLI flags 用法 |
 | `examples/cli_from_toml.rs` | TOML 文件加载用法 |
 | `examples/crate_api.rs` | crate API 用法 |
@@ -131,10 +135,17 @@ cargo run -- run --config .sandbox.toml cargo build
 cargo run -- check
 
 # 测试
-cargo test
-cargo test landlock                # 按名称过滤
-cargo test -- --nocapture          # 显示 stdout
-cargo test --test config_test      # 指定集成测试
+cargo test                          # 跑全部（库单元 + 集成 + 文档）
+cargo test --lib                    # 仅库单元测试
+cargo test --test <name>            # 指定集成测试文件（见下表）
+cargo test <name_fragment>          # 按测试名过滤（如 cargo test allow）
+cargo test -- --nocapture           # 显示每个测试的 stdout/stderr
+cargo test -- --nocapture --test-threads=1   # 串行 + 输出
+cargo test --release                # release 构建后跑测试
+cargo test -- --list                # 仅列出所有测试名，不跑
+
+# 单独构建 seccomp 测试依赖的辅助二进制
+cargo build --bin syscall_probe
 
 # 代码质量
 cargo clippy -- -D warnings
@@ -155,3 +166,45 @@ cargo audit
 - `classify_exit()` 同时检查 `exit_code` 和 `stderr` 特征串
 - 交叉编译目标：`x86_64-unknown-linux-musl`（静态链接），`aarch64-apple-darwin`
 - License: MIT (per `/LICENSE`) — 注意集成方许可证兼容性
+
+## 测试
+
+测试结构按"能力维度"分文件，每个集成测试都是独立二进制：
+
+| 文件 | 验证内容 | 前置 |
+|---|---|---|
+| `tests/config_test.rs` | `SandboxConfig` 的 TOML / Builder / 展开行为 | 无 |
+| `tests/deny_detect_test.rs` | `classify_exit()` 在各种 exit_code + stderr 组合下的分类 | Linux |
+| `tests/landlock_test.rs` | Landlock 实际 ACL 行为（库 API）+ CLI 二进制（策略→规则→拒绝消息）| Linux 5.13+ |
+| `tests/seccomp_test.rs` | 黑名单 13 个 syscall 端到端触发 + CLI 二进制拒绝消息 | Linux 3.5+ |
+
+跳过与预检：
+- 内核能力缺失时（无 Landlock / 无 seccomp）测试**自动跳过**（打印
+  `Landlock not available, skipping test`），不是 fail。
+- 真正会写入主机或触发特权操作的测试在跑前先做**探针**：跑一次已知
+  应被拒绝的操作确认机制生效（`verify_seccomp_active` /
+  `verify_landlock_active`）。探针结果用 `OnceLock` 缓存，
+  整个 session 只跑一次。
+- 所有写入主机的目标路径都用 PID 化（`.sandbox_runtime_*_<pid>`），
+  测试结束 best-effort 清理。
+
+辅助二进制 `src/bin/syscall_probe.rs`：
+- 接受 `syscall_nr [arg0..arg5]`，直接调用 `libc::syscall`。
+- 测试用它来逐个触发 seccomp 黑名单的 13 个 syscall，绕过 util-linux
+  unshare 改用 `clone3` 等实现差异。
+- 通过 `env!("CARGO_BIN_EXE_syscall_probe")` 让集成测试获取路径。
+
+常见组合：
+```bash
+# 改完代码的最小循环
+cargo build --tests && cargo test --lib
+
+# Landlock 二进制层验证
+cargo test --test landlock_test -- --nocapture
+
+# 全部 seccomp 测试（含逐 syscall 验证）
+cargo test --test seccomp_test
+
+# 跑全部并查看哪些被跳过
+cargo test -- --nocapture 2>&1 | grep skipping
+```

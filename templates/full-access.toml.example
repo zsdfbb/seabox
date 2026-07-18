@@ -1,9 +1,8 @@
-# Sandbox-runtime configuration: full-access policy
+# sandbox-runtime 配置：full-access 策略
 #
-# WARNING: This policy bypasses all sandbox restrictions.
-# The command runs with full filesystem and network access.
-# Only use this for commands that require unrestricted system access,
-# or when sandboxing causes compatibility issues.
+# 警告：该策略绕过所有沙箱限制。
+# 命令会以完整的文件系统与网络访问权限运行。
+# 仅在命令需要无限制的系统访问、或沙箱化导致兼容性问题时使用。
 
 [filesystem]
 policy = "full-access"

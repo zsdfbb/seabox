@@ -1,13 +1,11 @@
-//! Landlock ruleset construction.
+//! Landlock 规则集构造。
 //!
-//! Provides functions to build Landlock filesystem ACL rulesets
-//! based on the [`FsPolicy`] configuration.
+//! 提供根据 [`FsPolicy`] 配置构建 Landlock 文件系统 ACL 规则集的函数。
 //!
-//! Uses the `landlock` crate with [`CompatLevel::BestEffort`] for
-//! automatic ABI version detection and graceful degradation on
-//! kernels that don't support the full access set requested.
+//! 使用 `landlock` crate 的 [`CompatLevel::BestEffort`]，
+//! 自动检测 ABI 版本并在不支持完整访问集的内核上优雅降级。
 //!
-//! # Usage
+//! # 用法
 //!
 //! ```ignore
 //! use landlock::RulesetCreated;
@@ -16,8 +14,8 @@
 //!     &FsPolicy::ReadOnly, &[], Path::new("/"),
 //! )?;
 //! if let Some(ruleset) = created {
-//!     // Ruleset is configured but NOT yet applied.
-//!     // Restrict at the right moment (e.g. in a pre_exec closure):
+//!     // 规则集已配置但**尚未生效**。
+//!     // 在合适的时机（如 pre_exec 闭包内）施加：
 //!     let status = ruleset.restrict_self()?;
 //! }
 //! ```
@@ -32,21 +30,20 @@ use landlock::{
 use crate::FsPolicy;
 
 // ---------------------------------------------------------------------------
-// Availability
+// 可用性
 // ---------------------------------------------------------------------------
 
-/// Check whether Landlock is available on the current system.
+/// 检查当前系统是否支持 Landlock。
 ///
-/// Returns `true` if the kernel supports Landlock (Linux 5.13+ with
-/// `CONFIG_SECURITY_LANDLOCK=y` / `lsm=landlock`) **and** the running
-/// process has the necessary capabilities.
+/// 当且仅当内核支持 Landlock（Linux 5.13+ 且
+/// `CONFIG_SECURITY_LANDLOCK=y` / `lsm=landlock`）**且**当前进程
+/// 具备所需能力时返回 `true`。
 ///
-/// # Method
+/// # 方法
 ///
-/// Creates a minimal [`Ruleset`] with [`CompatLevel::HardRequirement`] and
-/// tries to handle [`ABI::V1`] read access.  If the `handle_access` call
-/// succeeds, Landlock is usable.  No actual ruleset FD is created and no
-/// process state is modified — the probe is purely in-memory.
+/// 用 [`CompatLevel::HardRequirement`] 创建一个最小 [`Ruleset`]，并尝试
+/// [`ABI::V1`] 的 read 访问。`handle_access` 调用成功即表明 Landlock
+/// 可用。本次探测不创建实际的规则集 FD、不修改进程状态 —— 它是纯内存的。
 pub fn is_available() -> bool {
     Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
@@ -54,41 +51,40 @@ pub fn is_available() -> bool {
         .is_ok()
 }
 
-/// Get the Landlock ABI version that the running kernel supports.
+/// 获取当前内核支持的 Landlock ABI 版本。
 ///
-/// Returns `None` if Landlock is not available at all.
+/// 若 Landlock 完全不可用则返回 `None`。
 ///
-/// # Method
+/// # 方法
 ///
-/// Probes from the highest ABI known to the crate (V7) down to V1 using
-/// [`CompatLevel::HardRequirement`] and returns the first version whose
-/// full [`AccessFs::from_all`] set is accepted by the kernel.
+/// 用 [`CompatLevel::HardRequirement`] 从 crate 已知最高 ABI（V7）向下探测
+/// 至 V1，返回第一个被内核完全接受（无 PartiallyCompatible /
+/// Incompatible 错误）的 [`AccessFs::from_all`] 版本。
 ///
-/// Landlock ABI versions correspond to kernel releases:
+/// Landlock ABI 版本与内核版本对应：
 ///
-/// | ABI | Linux kernel | New access rights              |
-/// |-----|--------------|-------------------------------|
-/// | 1   | 5.13         | Initial: read/write/execute   |
-/// | 2   | 5.19         | `REFER` (rename/link across   |
-/// |     |              | directory trees)               |
-/// | 3   | 6.2          | `TRUNCATE`                    |
-/// | 4   | 6.7          | `IOCTL_DEV`                   |
-/// | 5   | 6.10         | TCP bind/connect              |
-/// | 6   | 6.12         | `Scope` (AF_UNIX / signal)    |
-/// | 7   | 6.15         | Log flags for restrict_self   |
+/// | ABI | Linux 内核 | 新增的访问权限                  |
+/// |-----|------------|--------------------------------|
+/// | 1   | 5.13       | 初始：read/write/execute       |
+/// | 2   | 5.19       | `REFER`（跨目录树的 rename/link）|
+/// |     |            |                                |
+/// | 3   | 6.2        | `TRUNCATE`                     |
+/// | 4   | 6.7        | `IOCTL_DEV`                    |
+/// | 5   | 6.10       | TCP bind/connect               |
+/// | 6   | 6.12       | `Scope`（AF_UNIX / signal）    |
+/// | 7   | 6.15       | restrict_self 的 log flags     |
 pub fn get_abi_version() -> Option<i32> {
-    // Fast path: if V1 read access is not even supported, Landlock is
-    // unavailable.
+    // 快速路径：若连 V1 的读访问都不支持，则 Landlock 不可用。
     if !is_available() {
         return None;
     }
 
-    // Probe from highest known ABI down to V1.  Because access rights are
-    // cumulative across versions, the first version for which
-    // AccessFs::from_all(abi) is fully accepted (no PartiallyCompatible /
-    // Incompatible error) is the kernel's effective ABI.
+    // 从已知最高 ABI 向下探测至 V1。由于访问权限在各版本之间是
+    // 累积的，第一个让 AccessFs::from_all(abi) 完全被接受（没有
+    // PartiallyCompatible / Incompatible 错误）的版本就是内核
+    // 的有效 ABI。
     for v in (1..=7usize).rev() {
-        // ABI::from maps 1→V1, 2→V2, …, ≥8 → V7
+        // ABI::from 的映射：1→V1, 2→V2, …, ≥8 → V7
         let abi = ABI::from(v as i32);
         if Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
@@ -99,24 +95,22 @@ pub fn get_abi_version() -> Option<i32> {
         }
     }
 
-    // Safety net — at least V1 must be supported because `is_available()`
-    // returned true above.
+    // 安全网 —— 至少 V1 必须被支持，因为上面的 `is_available()` 返回了 true。
     Some(1)
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// 内部辅助
 // ---------------------------------------------------------------------------
 
-/// Return the Landlock ABI to use for constructing access masks.
+/// 返回用于构造访问掩码的 Landlock ABI。
 ///
-/// If Landlock is unavailable on the running kernel, falls back to
-/// [`ABI::V1`] so that [`AccessFs::from_read`] / [`AccessFs::from_write`]
-/// still return non-empty bit sets.  The subsequent [`Ruleset::create`] call
-/// will detect the incompatibility via the `BestEffort` compat state and
-/// return a no-op (dummy) [`RulesetCreated`].
+/// 若内核不支持 Landlock，则回退到 [`ABI::V1`]，使得
+/// [`AccessFs::from_read`] / [`AccessFs::from_write`] 仍能返回非空的位集。
+/// 后续的 [`Ruleset::create`] 调用会通过 BestEffort 兼容状态检测到
+/// 不兼容，并返回一个 no-op（dummy）的 [`RulesetCreated`]。
 fn get_effective_abi() -> ABI {
-    // ABI::from maps any value < 1 to Unsupported, 1→V1, 2→V2, …
+    // ABI::from 将任何 < 1 的值映射为 Unsupported，1→V1, 2→V2, …
     match get_abi_version() {
         Some(v) => ABI::from(v),
         None => ABI::V1,
@@ -124,45 +118,42 @@ fn get_effective_abi() -> ABI {
 }
 
 // ---------------------------------------------------------------------------
-// Ruleset construction
+// 规则集构造
 // ---------------------------------------------------------------------------
 
-/// Build a Landlock ruleset according to the given filesystem policy.
+/// 根据给定的文件系统策略构建 Landlock 规则集。
 ///
-/// The returned [`RulesetCreated`] is **configured with rules but not yet
-/// applied**. The caller must call [`RulesetCreated::restrict_self`] at the
-/// appropriate point (e.g. in a `pre_exec` closure after `fork()` but before
-/// `execve()`).  This two-phase construction allows the parent process to
-/// build the ruleset while the child applies it in a zero-allocation context.
+/// 返回的 [`RulesetCreated`] 已**配置好规则但尚未生效**。调用方必须在合适的
+/// 时刻（例如在 `pre_exec` 闭包中、位于 `fork()` 之后、`execve()` 之前）
+/// 调用 [`RulesetCreated::restrict_self`]。这种两阶段构造允许父进程构建
+/// 规则集，而子进程在零分配上下文中施加它。
 ///
-/// # Policy → Landlock mapping
+/// # 策略 → Landlock 映射
 ///
-/// | `FsPolicy`      | Handled access                     | Rules                                   |
-/// |-----------------|------------------------------------|-----------------------------------------|
-/// | `FullAccess`    | No Landlock ruleset created        | — (returns `None`)                      |
-/// | `ReadOnly`      | `READ_FILE \| READ_DIR`            | Read on `/`                             |
-/// | `WorkspaceWrite`| `READ_FILE \| READ_DIR \| WRITE_FILE \| REMOVE_DIR \| REMOVE_FILE \| MAKE_DIR \| MAKE_REG \| MAKE_SYM \| TRUNCATE` | Read on `/` + write on cwd, `/tmp`, `allow_write` paths |
+/// | `FsPolicy`       | 处理的访问                            | 规则                                       |
+/// |------------------|---------------------------------------|--------------------------------------------|
+/// | `FullAccess`     | 不创建任何 Landlock 规则集            | —（返回 `None`）                           |
+/// | `ReadOnly`       | `READ_FILE \| READ_DIR`               | 在 `/` 上授予读                            |
+/// | `WorkspaceWrite` | `READ_FILE \| READ_DIR \| WRITE_FILE \| REMOVE_DIR \| REMOVE_FILE \| MAKE_DIR \| MAKE_REG \| MAKE_SYM \| TRUNCATE` | 在 `/` 上授予读 + 在 cwd、`/tmp`、`allow_write` 路径上授予写 |
 ///
-/// # Path resolution
+/// # 路径解析
 ///
-/// All paths are opened via [`PathFd`] internally (which uses `O_PATH`).
-/// Paths that **do not exist** are **silently skipped**, following CodeWhale
-/// convention.  This includes `cwd` and `/tmp` if they are absent from the
-/// filesystem.
+/// 所有路径在内部通过 [`PathFd`]（使用 `O_PATH`）打开。
+/// **不存在**的路径会被**静默跳过**，沿用 CodeWhale 的惯例。
+/// 这包括 `cwd` 与 `/tmp`（若它们在文件系统中不存在）。
 ///
-/// The `allow_write` paths are expected to be pre-expanded and
-/// pre-canonicalised by the caller (see [`crate::config::expand_tilde`]).
+/// `allow_write` 路径应由调用方预先展开和规范化
+///（见 [`crate::config::expand_tilde`]）。
 ///
-/// # Errors
+/// # 错误
 ///
-/// Returns an error if Landlock access rights configuration itself is
-/// inconsistent (e.g. empty handled-access), or if the ruleset creation
-/// syscall fails on a kernel where Landlock *is* available.
+/// 当 Landlock 访问权限本身的配置不一致（例如 handled-access 为空）、
+/// 或在支持 Landlock 的内核上 ruleset 创建 syscall 失败时返回错误。
 ///
-/// Kernels without any Landlock support will **not** cause an error here:
-/// with [`CompatLevel::BestEffort`] the builder returns a no-op
-/// [`RulesetCreated`] whose [`restrict_self`](RulesetCreated::restrict_self)
-/// will report [`RulesetStatus::NotEnforced`].
+/// 在完全没有 Landlock 支持的内核上**不会**因此返回错误：
+/// 使用 [`CompatLevel::BestEffort`] 时，builder 会返回一个 no-op
+/// [`RulesetCreated`]，其 [`restrict_self`](RulesetCreated::restrict_self)
+/// 会报告 [`RulesetStatus::NotEnforced`]。
 ///
 /// [`PathFd`]: landlock::PathFd
 /// [`RulesetStatus::NotEnforced`]: landlock::RulesetStatus
@@ -173,19 +164,18 @@ pub fn build_ruleset(
 ) -> anyhow::Result<Option<RulesetCreated>> {
     match policy {
         // ------------------------------------------------------------------
-        // FullAccess: no Landlock restrictions at all
+        // FullAccess：完全不加 Landlock 限制
         // ------------------------------------------------------------------
         FsPolicy::FullAccess => Ok(None),
 
         // ------------------------------------------------------------------
-        // ReadOnly: deny all writes by handling both read and write access
-        // rights, but only granting read access in the rules.
+        // ReadOnly：通过同时处理 read 与 write 访问权限并仅在规则中
+        // 授予读权限来拒绝所有写入。
         //
-        // In Landlock, only access rights declared in the "handled" set are
-        // checked.  If write rights are not handled, the kernel allows all
-        // writes unconditionally.  By handling the full (read | write) mask
-        // and only granting read access via rules, all write attempts are
-        // denied (handled but not granted).
+        // 在 Landlock 中，只有 "handled" 集合中声明的访问权限才会被检查。
+        // 如果 write 权限未被处理，内核会无条件允许所有写操作。通过处理
+        // 完整的（read | write）掩码但只在规则中授予读访问，所有写尝试
+        // 都会被拒绝（被处理但未被授予）。
         // ------------------------------------------------------------------
         FsPolicy::ReadOnly => {
             let abi = get_effective_abi();
@@ -198,10 +188,10 @@ pub fn build_ruleset(
                 .handle_access(handled)?
                 .create()?;
 
-            // Grant read access to "/".  Write access is handled but never
-            // granted, so all writes are denied.
-            // path_beneath_rules silently skips paths that cannot be opened
-            // (impossible for "/" on any real system, but handled defensively).
+            // 向 "/" 授予读访问。write 权限被处理但从未被授予，
+            // 因此所有写都被拒绝。
+            // path_beneath_rules 会静默跳过无法打开的路径
+            //（实际系统中对 "/" 不会发生，但做了防御性处理）。
             let ruleset = ruleset
                 .add_rules(path_beneath_rules([Path::new("/")], read_access))?;
 
@@ -209,7 +199,7 @@ pub fn build_ruleset(
         }
 
         // ------------------------------------------------------------------
-        // WorkspaceWrite: read on "/" + write on cwd, /tmp, allow_write
+        // WorkspaceWrite：在 "/" 上读 + 在 cwd、/tmp、allow_write 上写
         // ------------------------------------------------------------------
         FsPolicy::WorkspaceWrite => {
             let abi = get_effective_abi();
@@ -222,32 +212,31 @@ pub fn build_ruleset(
                 .handle_access(handled)?
                 .create()?;
 
-            // --- Read rule on "/" ---
+            // --- 在 "/" 上加读规则 ---
             let ruleset = ruleset
                 .add_rules(path_beneath_rules([Path::new("/")], read_access))?;
 
-            // --- Collect writable paths ---
-            // path_beneath_rules silently skips non-existent paths, so we
-            // just collect candidates and let the helper filter.
+            // --- 收集可写路径 ---
+            // path_beneath_rules 会静默跳过不存在的路径，因此我们
+            // 仅收集候选，由辅助函数过滤。
             let mut writable_paths: Vec<PathBuf> =
                 Vec::with_capacity(2 + allow_write.len());
 
-            // 1. /tmp (standard temp directory)
+            // 1. /tmp（标准临时目录）
             writable_paths.push(PathBuf::from("/tmp"));
 
-            // 2. Current working directory
+            // 2. 当前工作目录
             writable_paths.push(cwd.to_path_buf());
 
-            // 3. Externally-provided allow_write paths (already expanded
-            //    and canonicalised by the caller).
+            // 3. 外部传入的 allow_write 路径（已由调用方展开并规范化）。
             writable_paths.extend(allow_write.iter().cloned());
 
-            // Deduplicate — the same path could appear in multiple sources
-            // (e.g. cwd == /tmp, or allow_write contains /tmp twice).
+            // 去重 —— 同一路径可能来自多个来源
+            //（例如 cwd == /tmp，或 allow_write 包含 /tmp 两次）。
             writable_paths.sort();
             writable_paths.dedup();
 
-            // --- Write rules ---
+            // --- 写规则 ---
             let ruleset = if !writable_paths.is_empty() {
                 ruleset.add_rules(path_beneath_rules(writable_paths, write_access))?
             } else {
@@ -260,7 +249,7 @@ pub fn build_ruleset(
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// 测试
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -270,9 +259,9 @@ mod tests {
 
     #[test]
     fn test_is_available_returns_bool() {
-        // Should always return a bool without panicking.
+        // 应当始终返回 bool 而不 panic。
         let _available = is_available();
-        // No assertion needed — reaching here means no panic.
+        // 不需要断言 —— 走到这里即说明未 panic。
     }
 
     #[test]
@@ -297,8 +286,8 @@ mod tests {
 
     #[test]
     fn test_build_ruleset_read_only_returns_ruleset() {
-        // build_ruleset should succeed even without Landlock support
-        // (returns a dummy RulesetCreated with BestEffort).
+        // 即便没有 Landlock 支持，build_ruleset 也应成功
+        //（通过 BestEffort 返回一个 dummy RulesetCreated）。
         let result = build_ruleset(&FsPolicy::ReadOnly, &[], Path::new("/"));
         assert!(
             result.is_ok(),
@@ -337,10 +326,10 @@ mod tests {
 
     #[test]
     fn test_build_ruleset_non_existent_paths_skipped() {
-        // Non-existent paths should be silently skipped by path_beneath_rules.
+        // 不存在的路径应被 path_beneath_rules 静默跳过。
         let allow = vec![
             PathBuf::from("/this/path/should/not/exist/abc123xyz"),
-            PathBuf::from("/tmp"), // exists
+            PathBuf::from("/tmp"), // 存在
         ];
         let result = build_ruleset(&FsPolicy::WorkspaceWrite, &allow, Path::new("/tmp"));
         assert!(result.is_ok());
@@ -351,7 +340,7 @@ mod tests {
     fn test_dedup_writable_paths() {
         let allow = vec![
             PathBuf::from("/tmp"),
-            PathBuf::from("/tmp"), // duplicate
+            PathBuf::from("/tmp"), // 重复
         ];
         let result = build_ruleset(&FsPolicy::WorkspaceWrite, &allow, Path::new("/tmp"));
         assert!(result.is_ok());
@@ -360,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_build_ruleset_for_missing_cwd() {
-        // cwd that doesn't exist should be silently skipped.
+        // 不存在的 cwd 应被静默跳过。
         let result = build_ruleset(
             &FsPolicy::WorkspaceWrite,
             &[],
@@ -373,7 +362,7 @@ mod tests {
     #[test]
     fn test_get_effective_abi_never_unsupported() {
         let abi = get_effective_abi();
-        // Must never be Unsupported (ABI::Unsupported == ABI::from(0)).
+        // 永远不能是 Unsupported（ABI::Unsupported == ABI::from(0)）。
         assert_ne!(abi, ABI::Unsupported);
     }
 }

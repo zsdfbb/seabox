@@ -11,52 +11,52 @@ use sandbox_runtime::{CommandSpec, ExitReason, FsPolicy, Sandbox};
 use sandbox_runtime::linux::{self, LinuxSandbox};
 
 // ---------------------------------------------------------------------------
-// CLI definition
+// CLI 定义
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
 #[command(name = "sandbox-runtime")]
 enum Cli {
-    /// Run a command inside the sandbox
+    /// 在沙箱内运行一条命令
     Run {
-        /// Path to TOML configuration file
+        /// TOML 配置文件的路径
         #[arg(short, long)]
         config: Option<PathBuf>,
 
-        /// Sandbox policy: full-access, read-only, workspace
+        /// 沙箱策略：full-access、read-only、workspace
         #[arg(short = 'p', long)]
         policy: Option<String>,
 
-        /// Allow network access
+        /// 允许网络访问
         #[arg(short = 'n', long)]
         allow_network: bool,
 
-        /// Additional writable paths (can be repeated)
+        /// 额外的可写路径（可重复指定）
         #[arg(short = 'w', long)]
         allow_write: Vec<String>,
 
-        /// Enable debug output
+        /// 启用调试输出
         #[arg(short = 'd', long)]
         debug: bool,
 
-        /// Command to execute (trailing arguments; use -- to separate)
+        /// 要执行的命令（trailing 参数；使用 -- 进行分隔）
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
 
-    /// Check available sandbox mechanisms on this system
+    /// 检查当前系统可用的沙箱机制
     Check,
 
-    /// Start the HTTP API server (stub, not yet implemented)
+    /// 启动 HTTP API 服务器（占位实现，尚未完成）
     Serve {
-        /// Port to listen on
+        /// 监听的端口
         #[arg(long, default_value_t = 7878)]
         port: u16,
     },
 }
 
 // ---------------------------------------------------------------------------
-// Entry point
+// 入口
 // ---------------------------------------------------------------------------
 
 fn main() -> anyhow::Result<()> {
@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// run subcommand
+// run 子命令
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -116,12 +116,12 @@ fn cmd_run(
 
     let output = sandbox.execute(&spec)?;
 
-    // Forward stdout
+    // 转发 stdout
     if !output.stdout.is_empty() {
         print!("{}", output.stdout);
     }
 
-    // Forward stderr
+    // 转发 stderr
     if !output.stderr.is_empty() {
         eprint!("{}", output.stderr);
     }
@@ -158,7 +158,7 @@ fn cmd_run(
 }
 
 // ---------------------------------------------------------------------------
-// check subcommand
+// check 子命令
 // ---------------------------------------------------------------------------
 
 fn cmd_check() -> anyhow::Result<()> {
@@ -200,7 +200,7 @@ fn cmd_check() -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// serve subcommand (stub)
+// serve 子命令（占位）
 // ---------------------------------------------------------------------------
 
 fn cmd_serve(port: u16) -> anyhow::Result<()> {
@@ -208,15 +208,15 @@ fn cmd_serve(port: u16) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Configuration helpers
+// 配置辅助函数
 // ---------------------------------------------------------------------------
 
-/// Build a [`SandboxConfig`] by merging optional TOML config with CLI flags.
+/// 通过合并可选的 TOML 配置与 CLI flags 来构建一个 [`SandboxConfig`]。
 ///
-/// CLI flags take precedence over values loaded from the TOML file:
-/// - `--policy` overrides `filesystem.policy`
-/// - `--allow-write` replaces `filesystem.allow_write` entirely
-/// - `--allow-network` sets `network.enabled`
+/// CLI flag 优先于从 TOML 加载的值：
+/// - `--policy` 覆盖 `filesystem.policy`
+/// - `--allow-write` 完全替换 `filesystem.allow_write`
+/// - `--allow-network` 设置 `network.enabled`
 fn build_config(
     config_path: Option<PathBuf>,
     policy: Option<String>,
@@ -229,7 +229,7 @@ fn build_config(
         SandboxConfig::default()
     };
 
-    // CLI flags override TOML values
+    // CLI flag 覆盖 TOML 值
     if let Some(p) = policy {
         config.filesystem.policy = parse_policy(&p)?;
     }
@@ -243,7 +243,7 @@ fn build_config(
     Ok(config)
 }
 
-/// Parse a policy string into an [`FsPolicy`].
+/// 将策略字符串解析为 [`FsPolicy`]。
 fn parse_policy(s: &str) -> anyhow::Result<FsPolicy> {
     match s {
         "full-access" => Ok(FsPolicy::FullAccess),
