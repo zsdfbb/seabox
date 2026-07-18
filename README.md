@@ -151,11 +151,11 @@ sandbox-runtime run --policy read-only -- sh -c "echo 'hello' >> README.md"
 sandbox-runtime 在 spawn 失败时会主动提示这条修改建议：
 
 ```
-Error: Failed to spawn sandboxed process 'echo 'hello' >> README.md'. 
-Note: sandbox-runtime does NOT interpret shell metacharacters 
-(>, >>, |, *, &&, etc.) — it runs the program directly via execve. 
-To use shell syntax, invoke 'sh -c' explicitly, e.g. 
-`-- sh -c "your shell command here"`. 
+Error: Failed to spawn sandboxed process 'echo 'hello' >> README.md'.
+Note: sandbox-runtime does NOT interpret shell metacharacters
+(>, >>, |, *, &&, etc.) — it runs the program directly via execve.
+To use shell syntax, invoke 'sh -c' explicitly, e.g.
+`-- sh -c "your shell command here"`.
 Or split the command into separate args without shell metacharacters.
 ```
 

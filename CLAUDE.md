@@ -167,6 +167,26 @@ cargo audit
 - 交叉编译目标：`x86_64-unknown-linux-musl`（静态链接），`aarch64-apple-darwin`
 - License: MIT (per `/LICENSE`) — 注意集成方许可证兼容性
 
+### 测试安全
+
+**绝不要**用 shell 外层重定向（`> file`、`>> file`）把 sandbox-runtime 的 stdout/stderr 写入本仓库里的任何工程文件（README、CLAUDE.md、源码、配置等），否则会绕过沙箱直接修改项目文件。
+
+正确的写法：
+
+```bash
+# ❌ 危险：直接覆盖工程文件
+./sandbox-runtime run -- sh -c "echo x" > README.md
+
+# ✅ 写到 /tmp 或 tempdir
+./sandbox-runtime run -- sh -c "echo x" > /tmp/test.out
+
+# ✅ 用变量接住输出
+out=$(./sandbox-runtime run -- sh -c "echo x")
+echo "$out"
+```
+
+如果误改了工程文件，立即 `git checkout <file>` 恢复。
+
 ## 测试
 
 测试结构按"能力维度"分文件，每个集成测试都是独立二进制：
