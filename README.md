@@ -134,6 +134,31 @@ sandbox-runtime run --policy full-access -- rm -rf ./build
 sandbox-runtime run -- cargo build --release
 ```
 
+### ⚠️ 沙箱不会解释 shell 元字符
+
+sandbox-runtime 通过 `execve` **直接执行单个程序**，**不**经过 shell。也就是说 `>`、`>>`、`|`、`*`、`&&` 等 shell 元字符会被当作普通字符传给 `execve`，导致 spawn 以 ENOENT 失败（找不到这个"程序"）。
+
+需要 shell 语法时显式 spawn `sh -c`：
+
+```bash
+# ❌ 这样会失败：spawn 找不到叫 "echo 'hello' >> README.md" 的程序
+sandbox-runtime run --policy read-only -- "echo 'hello' >> README.md"
+
+# ✅ 这样才对：把整条 shell 命令作为 -c 的参数
+sandbox-runtime run --policy read-only -- sh -c "echo 'hello' >> README.md"
+```
+
+sandbox-runtime 在 spawn 失败时会主动提示这条修改建议：
+
+```
+Error: Failed to spawn sandboxed process 'echo 'hello' >> README.md'. 
+Note: sandbox-runtime does NOT interpret shell metacharacters 
+(>, >>, |, *, &&, etc.) — it runs the program directly via execve. 
+To use shell syntax, invoke 'sh -c' explicitly, e.g. 
+`-- sh -c "your shell command here"`. 
+Or split the command into separate args without shell metacharacters.
+```
+
 ## Crate API 使用
 
 作为库嵌入时，通过 `SandboxConfig` + `LinuxSandbox` + `CommandSpec` 三件套构建并执行命令。

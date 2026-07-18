@@ -49,6 +49,12 @@ impl Sandbox for LinuxSandbox {
     /// 在**父进程**中构建 Landlock 规则集与 seccomp BPF filter，
     /// 然后在**子进程**中通过 `pre_exec` 闭包（零分配上下文）施加两者。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput> {
+        // 在 spawn 之前先复制 program 名，用于失败时的诊断消息。
+        // sandbox-runtime 通过 `execve` 直接执行单个程序，不解释 shell
+        // 元字符（`>`、`>>`、`|`、`*` 等）；用户传入含 shell 语法的 token
+        // 时，spawn 会以 ENOENT 失败，要在错误里把修改建议说清楚。
+        let program_for_error = spec.program.clone();
+
         // ── 步骤 1：构建 Landlock 规则集并取出其 fd ────────────────────
         let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd(spec)?;
         let raw_ruleset_fd: i32 = ruleset_fd
@@ -151,12 +157,23 @@ impl Sandbox for LinuxSandbox {
                     Ok(())
                 })
                 .spawn()
-                .context("Failed to spawn sandboxed process")?
+                .with_context(|| format!(
+                    "Failed to spawn sandboxed process '{program_for_error}'. \
+                     Note: sandbox-runtime does NOT interpret shell metacharacters \
+                     (>, >>, |, *, &&, etc.) — it runs the program directly via execve. \
+                     To use shell syntax, invoke 'sh -c' explicitly, e.g. \
+                     `-- sh -c \"your shell command here\"`. \
+                     Or split the command into separate args without shell metacharacters."
+                ))?
         };
 
         let output = output
             .wait_with_output()
-            .context("Failed to wait for sandboxed process")?;
+            .with_context(|| {
+                format!(
+                    "Failed to wait for sandboxed process '{program_for_error}' (after spawn)"
+                )
+            })?;
 
         // `ruleset_fd` 在此 drop → fd 在父进程中关闭。
 
