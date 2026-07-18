@@ -126,7 +126,7 @@ fn cmd_run(
         eprint!("{}", output.stderr);
     }
 
-    let reason = sandbox.classify_exit(output.exit_code, &output.stderr);
+    let reason = sandbox.classify_exit(output.exit_code, &output.stderr, output.blocked_syscall);
 
     match reason {
         ExitReason::Ok => std::process::exit(0),

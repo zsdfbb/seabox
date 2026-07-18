@@ -110,7 +110,7 @@ sandbox-runtime serve [--port 7878]
 | `125` | 沙箱内部错误 |
 | `126` | 沙箱拒绝（Landlock 或 seccomp） |
 
-拒绝时 stderr 会输出形如 `Sandbox denial (Landlock): Landlock blocked access: ...` 或 `Sandbox denial (Seccomp): Blocked by seccomp filter (SIGSYS)` 的诊断消息。
+拒绝时 stderr 会输出形如 `Sandbox denial (Landlock): Landlock blocked access: ...` 或 `Sandbox denial (Seccomp): Blocked by seccomp filter (SIGSYS): syscall='mount' category='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS` 的诊断消息。seccomp 拒绝消息会携带被拦 syscall 的名字、分类、号与架构，便于人工定位与 agent 自动归因。
 
 ### 常用模式
 
@@ -337,7 +337,7 @@ docs/                       # 详细设计文档
 | Phase | 内容 | 状态 |
 |---|---|---|
 | 1 | Core + Linux 文件系统隔离（Landlock + seccomp + CLI） | ✅ |
-| 2 | Linux 完整进程隔离（user_ns + netns + setrlimit） | 🚧 |
+| 2 | Linux 完整进程隔离（user_ns + netns + 自定义 seccomp） | 🚧 |
 | 2b | eBPF 云容器后端（aya + cgroup_sock_addr） | 🚧 |
 | 3 | macOS 支持（Seatbelt） | 🚧 |
 | 4 | CodeWhale 集成 + HTTP API（OpenSandbox v1 兼容）| 🚧 |
