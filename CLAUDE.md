@@ -259,3 +259,21 @@ cargo test --test seccomp_test
 # 跑全部并查看哪些被跳过
 cargo test -- --nocapture 2>&1 | grep skipping
 ```
+
+## 经验教训
+
+跨会话累积的踩坑记录，下次开工前必读。
+
+### USER_NOTIF worker hang（2026-07-18）
+
+**坑：** `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 是阻塞调用，worker 唯一退出条件是收到 notification。子进程若不触发黑名单 syscall（如 `/bin/true`），worker 永远阻塞，主线程 `join()` 永久卡死。原 13 个 seccomp_test 全是"触发黑名单"场景，没人测"不触发"——bug 静默存活。
+
+**修复：** self-pipe + `poll([listener_fd, shutdown_r], -1)` event-driven；提取 `UserNotifHandle` struct 封装 worker 生命周期（`shutdown()` 写 pipe、`join()` by value）。
+
+**教训：**
+
+1. **阻塞 syscall + 跨线程协调 = 死锁温床**。任何阻塞调用都必须配中断路径（poll/timeout/signal），主线程不能 join 一个可能被永久阻塞的 worker。
+2. **集成测试要覆盖 happy path**。只测"触发异常"的路径会漏掉"异常不发生"时的协调 bug。建议每个端到端测试至少 1 个"正常退出"用例。
+3. **代码组织影响可调试性**。worker 散在 `execute()` 内联逻辑 → 难以独立审查 → bug 不易被发现。提取独立 helper + struct 后可单测。
+
+**回归测试：** `tests/seccomp_test.rs::normal_exit_does_not_hang_worker`（跑 `/bin/true` + 显式 `Instant` 测时双重防护）。
