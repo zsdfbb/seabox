@@ -925,3 +925,13 @@ fn cli_full_access_allows_write_to_var_tmp() {
         out.stderr
     );
 }
+
+/// 哨兵测试：确保最后一个执行的测试显式 flush stdout。
+/// 用于诊断 cargo 在并发测试模式下是否因 stdout 未 flush 而 hang。
+#[test]
+fn zzz_flush_stdout_marker() {
+    use std::io::Write;
+    println!("FLUSH_MARKER");
+    std::io::stdout().flush().unwrap();
+    std::io::stderr().flush().unwrap();
+}

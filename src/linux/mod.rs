@@ -132,7 +132,10 @@ impl Sandbox for LinuxSandbox {
         // - 父端保留 `parent_stream` 用于 `recvmsg` 收 listener fd。
         // - 子端原始 fd 数值 `child_fd` 通过 `i32` 传入 `pre_exec` 闭包
         //   （async-signal-safe），由 `send_fd` 调用后显式 `libc::close`。
-        let (parent_stream, child_fd_raw) = create_socketpair()?;
+        let (parent_stream, child_sock) = create_socketpair()?;
+        // 提取原始 fd 数值供 pre_exec 闭包使用（闭包内只能访问 i32 Copy，
+        // 不能持有 OwnedFd——闭包在 fork 后 drop 会双关同一 fd）。
+        let child_fd_raw = child_sock.as_raw_fd();
 
         // ── 步骤 5：以 pre_exec 施加限制并 spawn 子进程 ───────────────
         //
@@ -256,6 +259,11 @@ impl Sandbox for LinuxSandbox {
                     )
                 })?
         };
+
+        // 关闭子端 socketpair fd（OwnedFd drop → RAII close）。无论 pre_exec
+        // 是否成功执行 sendmsg，子端都必须在父进程中关闭；否则 socketpair 连接
+        // 存活，worker 线程的 recvmsg 永远阻塞（死锁详见 docs/learned.md）。
+        drop(child_sock);
 
         let pid = child.id() as libc::id_t;
 
@@ -578,7 +586,7 @@ impl LinuxSandbox {
 /// # 错误
 ///
 /// `socketpair` 失败时返回 `io::Error`。常见原因：fd 上限耗尽。
-fn create_socketpair() -> std::io::Result<(OwnedFd, RawFd)> {
+fn create_socketpair() -> std::io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as RawFd; 2];
     // SAFETY：socketpair(2) 接受有效协议族与 type，flags=0 是默认；
     // 输出数组长度为 2，对应一个 read fd + 一个 write fd。
@@ -586,11 +594,11 @@ fn create_socketpair() -> std::io::Result<(OwnedFd, RawFd)> {
     if ret != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let parent_fd = fds[0];
-    let child_fd = fds[1];
-    // SAFETY：parent_fd 是刚创建的有效 socket fd；移交给 OwnedFd 后由 RAII 管理。
-    let parent_owned = unsafe { OwnedFd::from_raw_fd(parent_fd) };
-    Ok((parent_owned, child_fd))
+    // SAFETY：两个 fd 都是 socketpair 刚创建的有效 fd；移交给 OwnedFd 后由 RAII 管理，
+    // 超出作用域时自动 close。
+    let parent = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+    let child = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+    Ok((parent, child))
 }
 
 /// 把一个 fd 通过 `sendmsg(SCM_RIGHTS)` 经 unix socket 发出去。
@@ -815,7 +823,7 @@ fn spawn_user_notif_worker(
         // 3a) 收 listener fd。阻塞直到子进程 sendmsg 或子进程已死。
         let listener_fd_raw = match recv_fd(parent_sock_raw) {
             Ok(fd) => fd,
-            Err(_) => {
+            Err(_e) => {
                 // 子进程未发出 listener 就退出（如 spawn 失败 / 直接被信号杀）。
                 // 这种情况没有 seccomp 命中，shutdown_r_owned 自动 drop 关闭。
                 return;
