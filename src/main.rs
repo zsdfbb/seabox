@@ -116,17 +116,7 @@ fn cmd_run(
 
     let output = sandbox.execute(&spec)?;
 
-    // 转发 stdout
-    if !output.stdout.is_empty() {
-        print!("{}", output.stdout);
-    }
-
-    // 转发 stderr
-    if !output.stderr.is_empty() {
-        eprint!("{}", output.stderr);
-    }
-
-    let reason = sandbox.classify_exit(output.exit_code, &output.stderr, output.blocked_syscall);
+    let reason = sandbox.classify_exit(output.exit_code, output.blocked_syscall);
 
     match reason {
         ExitReason::Ok => std::process::exit(0),

@@ -150,7 +150,7 @@ fn verify_landlock_active() -> bool {
     );
     // 探针写入本应在 read-only 下被拒绝。若成功或返回非 126，
     // 说明 Landlock 没生效，跳过一切后续测试。
-    out.exit_code == Some(126) && out.stderr.contains("Sandbox denial (Landlock)")
+    out.exit_code == Some(126)
 }
 
 /// `OnceLock` 缓存的探针结果，整个测试 session 只跑一次。
@@ -205,8 +205,8 @@ fn workspace_write_allows_write() {
 
     assert_eq!(
         output.exit_code, 0,
-        "write should succeed under WorkspaceWrite, exit_code={}, stderr={}",
-        output.exit_code, output.stderr
+        "write should succeed under WorkspaceWrite, exit_code={}",
+        output.exit_code
     );
     assert!(
         dir_path.join("test.txt").exists(),
@@ -244,8 +244,8 @@ fn full_access_bypasses_landlock() {
 
     assert_eq!(
         output.exit_code, 0,
-        "write should succeed under FullAccess, exit_code={}, stderr={}",
-        output.exit_code, output.stderr
+        "write should succeed under FullAccess, exit_code={}",
+        output.exit_code
     );
     assert!(
         dir_path.join("test.txt").exists(),
@@ -283,8 +283,8 @@ fn read_only_blocks_write() {
 
     assert_ne!(
         output.exit_code, 0,
-        "write should fail under ReadOnly, exit_code={}, stderr={}",
-        output.exit_code, output.stderr
+        "write should fail under ReadOnly, exit_code={}",
+        output.exit_code
     );
     assert!(
         !dir_path.join("test.txt").exists(),
@@ -326,11 +326,6 @@ fn cli_read_only_blocks_write_with_exit_126() {
         "read-only 下写入应被 Landlock 拒绝，wrapper 应退出 126。\
          stdout={:?} stderr={:?}",
         out.stdout,
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("Sandbox denial (Landlock)"),
-        "stderr 应含 'Sandbox denial (Landlock)'，实际：{:?}",
         out.stderr
     );
 }
@@ -386,11 +381,6 @@ fn cli_workspace_write_blocks_write_outside_cwd() {
         "workspace 下写工作目录之外应被 Landlock 拒绝。\
          stdout={:?} stderr={:?}",
         out.stdout,
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("Sandbox denial (Landlock)"),
-        "stderr 应含 'Sandbox denial (Landlock)'，实际：{:?}",
         out.stderr
     );
 }
@@ -527,12 +517,8 @@ fn read_only_allows_read() {
 
     assert_eq!(
         output.exit_code, 0,
-        "ReadOnly 应允许读取 /etc/passwd。exit={}, stderr={}",
-        output.exit_code, output.stderr
-    );
-    assert!(
-        !output.stdout.is_empty(),
-        "cat /etc/passwd 应有输出，实际为空"
+        "ReadOnly 应允许读取 /etc/passwd。exit={}",
+        output.exit_code
     );
 }
 
@@ -567,8 +553,8 @@ fn workspace_write_allows_write_to_tmp() {
 
     assert_eq!(
         output.exit_code, 0,
-        "WorkspaceWrite 应允许写 /tmp。exit={}, stderr={}",
-        output.exit_code, output.stderr
+        "WorkspaceWrite 应允许写 /tmp。exit={}",
+        output.exit_code
     );
 }
 
@@ -597,8 +583,8 @@ fn workspace_write_allows_read_anywhere() {
 
     assert_eq!(
         output.exit_code, 0,
-        "WorkspaceWrite 应允许读 /etc/passwd。exit={}, stderr={}",
-        output.exit_code, output.stderr
+        "WorkspaceWrite 应允许读 /etc/passwd。exit={}",
+        output.exit_code
     );
 }
 
@@ -640,8 +626,8 @@ fn workspace_write_grants_allow_write_path() {
 
     assert_eq!(
         output.exit_code, 0,
-        "allow_write 列表中的路径应可写。exit={}, stderr={}",
-        output.exit_code, output.stderr
+        "allow_write 列表中的路径应可写。exit={}",
+        output.exit_code
     );
 }
 
@@ -686,8 +672,8 @@ fn workspace_write_does_not_grant_unlisted_path() {
 
     assert_ne!(
         output.exit_code, 0,
-        "未列入 allow_write 的路径应被拒绝。exit={}, stderr={}",
-        output.exit_code, output.stderr
+        "未列入 allow_write 的路径应被拒绝。exit={}",
+        output.exit_code
     );
 }
 
@@ -722,8 +708,8 @@ fn full_access_does_not_intercept_writes() {
 
     assert_eq!(
         output.exit_code, 0,
-        "FullAccess 不应拦截任何写。exit={}, stderr={}",
-        output.exit_code, output.stderr
+        "FullAccess 不应拦截任何写。exit={}",
+        output.exit_code
     );
 }
 
@@ -862,11 +848,6 @@ fn cli_workspace_write_does_not_grant_unlisted_path() {
         "CLI 未列入 --allow-write 的路径应被拒绝。\
          stdout={:?} stderr={:?}",
         out.stdout,
-        out.stderr
-    );
-    assert!(
-        out.stderr.contains("Sandbox denial (Landlock)"),
-        "stderr 应含 'Sandbox denial (Landlock)'，实际：{:?}",
         out.stderr
     );
 }

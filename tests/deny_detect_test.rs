@@ -25,7 +25,7 @@ fn make_sandbox() -> LinuxSandbox {
 #[test]
 fn exit_zero_ok() {
     let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(0, "some error text", None);
+    let result = sandbox.classify_exit(0, None);
     assert_eq!(result, ExitReason::Ok);
 }
 
@@ -36,7 +36,7 @@ fn exit_zero_ok() {
 #[test]
 fn exit_31_seccomp_direct() {
     let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(31, "", None);
+    let result = sandbox.classify_exit(31, None);
     assert_eq!(
         result,
         ExitReason::Denied {
@@ -49,7 +49,7 @@ fn exit_31_seccomp_direct() {
 #[test]
 fn exit_159_seccomp_shell() {
     let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(159, "", None);
+    let result = sandbox.classify_exit(159, None);
     assert_eq!(
         result,
         ExitReason::Denied {
@@ -63,76 +63,14 @@ fn exit_159_seccomp_shell() {
 // stderr 中的 Landlock 拒绝模式（exit_code = 1）
 // ---------------------------------------------------------------------------
 
-#[test]
-fn stderr_operation_not_permitted() {
-    let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(1, "Operation not permitted", None);
-    assert!(result.is_denied());
-    assert_eq!(
-        result,
-        ExitReason::Denied {
-            mechanism: DenyMechanism::Landlock,
-            message: "Landlock blocked access: Operation not permitted".into(),
-        }
-    );
-}
 
-#[test]
-fn stderr_permission_denied() {
-    let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(1, "Permission denied", None);
-    assert!(result.is_denied());
-    assert_eq!(
-        result,
-        ExitReason::Denied {
-            mechanism: DenyMechanism::Landlock,
-            message: "Landlock blocked access: Permission denied".into(),
-        }
-    );
-}
 
 // ---------------------------------------------------------------------------
 // stderr 中的 seccomp 拒绝模式（exit_code = 1）
 // ---------------------------------------------------------------------------
 
-#[test]
-fn stderr_bad_system_call() {
-    let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(1, "Bad system call (core dumped)", None);
-    assert_eq!(
-        result,
-        ExitReason::Denied {
-            mechanism: DenyMechanism::Seccomp,
-            message: "Seccomp blocked syscall: Bad system call (core dumped)".into(),
-        }
-    );
-}
 
-#[test]
-fn stderr_sigsys() {
-    let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(1, "SIGSYS from seccomp", None);
-    assert_eq!(
-        result,
-        ExitReason::Denied {
-            mechanism: DenyMechanism::Seccomp,
-            message: "Seccomp blocked syscall: SIGSYS from seccomp".into(),
-        }
-    );
-}
 
-#[test]
-fn stderr_seccomp() {
-    let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(1, "seccomp filter killed process", None);
-    assert_eq!(
-        result,
-        ExitReason::Denied {
-            mechanism: DenyMechanism::Seccomp,
-            message: "Seccomp blocked syscall: seccomp filter killed process".into(),
-        }
-    );
-}
 
 // ---------------------------------------------------------------------------
 // 没有匹配 → Program(exit_code)
@@ -141,14 +79,14 @@ fn stderr_seccomp() {
 #[test]
 fn exit_1_no_match_program() {
     let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(1, "some unrelated error message", None);
+    let result = sandbox.classify_exit(1, None);
     assert_eq!(result, ExitReason::Program(1));
 }
 
 #[test]
 fn exit_139_sigsegv() {
     let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(139, "", None);
+    let result = sandbox.classify_exit(139, None);
     assert_eq!(result, ExitReason::Program(139));
 }
 
@@ -161,7 +99,7 @@ fn exit_139_sigsegv() {
 #[test]
 fn exit_159_with_block_marker_returns_rich_message() {
     let sandbox = make_sandbox();
-    let result = sandbox.classify_exit(159, "", Some((165, 0xc000003e)));
+    let result = sandbox.classify_exit(159, Some((165, 0xc000003e)));
     match result {
         ExitReason::Denied { message, .. } => {
             assert!(message.contains("syscall='mount'"));

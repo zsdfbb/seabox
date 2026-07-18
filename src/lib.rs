@@ -147,10 +147,6 @@ pub struct PreparedCommand {
 /// 执行沙箱化命令的结果。
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
-    /// 从命令捕获的标准输出。
-    pub stdout: String,
-    /// 从命令捕获的标准错误。
-    pub stderr: String,
     /// 命令的退出码。
     pub exit_code: i32,
     /// 若子进程被 seccomp 黑名单命中后被 SIGSYS 杀死，
@@ -175,7 +171,7 @@ pub trait Sandbox: Send + Sync {
     /// 在沙箱限制下执行命令，并返回其输出。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput>;
 
-    /// 将已完成命令的退出码与 stderr 归类为一个 [`ExitReason`]，
+    /// 将已完成命令的退出码归类为一个 [`ExitReason`]，
     /// 区分沙箱拒绝（Landlock、seccomp 等）、正常程序退出与内部错误。
     ///
     /// `blocked` 仅在 seccomp 命中黑名单（子进程被 SIGSYS 杀死）时有值，
@@ -183,7 +179,6 @@ pub trait Sandbox: Send + Sync {
     fn classify_exit(
         &self,
         exit_code: i32,
-        stderr: &str,
         blocked: Option<(u32, u32)>,
     ) -> ExitReason;
 }

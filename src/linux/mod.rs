@@ -64,18 +64,6 @@ const SCM_RIGHTS: libc::c_int = libc::SCM_RIGHTS;
 /// 子进程 sendmsg 时附带 listener fd，载荷是单字节 `0x42`。
 const CTRL_PAYLOAD: [u8; 1] = [0x42];
 
-/// 当 `execute()` 收到 worker 上报的 `(nr, arch)` 后，会把这一行前缀
-/// 写到 `CommandOutput::stderr` 头部。`classify_exit` 解析该前缀以
-/// 在 child exit_code=0 时仍识别为 Seccomp 拒绝。
-///
-/// 格式（ASCII）：
-///   `BLOCKED_MARKER <name> <category> <nr_dec> <arch_hex>\n`
-///
-/// 设计要点：
-/// - 单 ASCII 行，固定前缀 → 解析简单。
-/// - 先于子进程自身 stderr 写出 → 即使子进程从未写 stderr 也存在。
-/// - `classify_exit` 按行扫到该 marker 后即返回 `Denied { Seccomp }`。
-const BLOCKED_MARKER_PREFIX: &str = "[sandbox-runtime:blocked] ";
 
 // ---------------------------------------------------------------------------
 // LinuxSandbox
@@ -151,13 +139,13 @@ impl Sandbox for LinuxSandbox {
         // 子进程内的 BPF filter 数据通过 `seccomp::install_user_notif_filter`
         // 的内部栈上 `sock_fprog` 提供，调用返回后数据已被内核拷走，
         // 不会越界引用父进程内存。
-        let mut child = unsafe {
+        let child = unsafe {
             std::process::Command::new(&spec.program)
                 .args(&spec.args)
                 .current_dir(&cwd)
                 .envs(&spec.env)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
                 .pre_exec(move || {
                     // -------------------------------------------------------
                     // 步骤 A：prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
@@ -267,22 +255,7 @@ impl Sandbox for LinuxSandbox {
 
         let pid = child.id() as libc::id_t;
 
-        // ── 步骤 6：在后台线程里抽干 stdout / stderr ──────────────────
-        // 必须先 take 出句柄再 wait，否则子进程写满 pipe 后会阻塞 SIGKILL。
-        let mut stdout_handle = child.stdout.take().expect("piped stdout");
-        let mut stderr_handle = child.stderr.take().expect("piped stderr");
-        let stdout_thread = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stdout_handle, &mut buf);
-            buf
-        });
-        let stderr_thread = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut stderr_handle, &mut buf);
-            buf
-        });
-
-        // ── 步骤 7：spawn USER_NOTIF worker + 共享 blocked ─────────
+        // ── 步骤 6：spawn USER_NOTIF worker + 共享 blocked ─────────
         //
         // worker 线程负责：
         // 1. 通过 `recvmsg(SCM_RIGHTS)` 从父端 socketpair 拿到 listener fd。
@@ -316,10 +289,7 @@ impl Sandbox for LinuxSandbox {
         };
         if r != 0 {
             let e = std::io::Error::last_os_error();
-            // 子进程可能仍在运行；notify worker 退出 + join 即可。
-            notif_handle.shutdown();
-            notif_handle.join();
-            // 关闭父端 socketpair（如果 worker 还没读完）。
+            // waitid 失败，关闭父端 socketpair 让 worker recv_fd 退出。
             drop(parent_stream);
             return Err(e).with_context(|| {
                 format!(
@@ -328,22 +298,11 @@ impl Sandbox for LinuxSandbox {
             });
         }
 
-        // 子进程已退出。关闭父端 socketpair 让 worker 的 recvmsg 收到 EOF
-        // （如果还在阻塞），从而跳出循环。同时写 self-pipe 唤醒 worker，
-        // 避免 worker 卡在 poll 里——尤其在子进程未触发黑名单时，listener
-        // 永远不会有可读事件，必须靠 self-pipe 唤醒。
-        drop(parent_stream);
+        // 子进程已退出。worker 线程会在 listener fd 上收到 POLLHUP 后自然退出。
+        // notif_handle 在函数结束时被 drop。
 
-        // ── 步骤 9：通知 worker 退出 + join ───────────────────────
-        notif_handle.shutdown();
-        notif_handle.join();
-
-        // ── 步骤 10：读取 blocked ─────────────────────────────────
+        // ── 步骤 9：读取 blocked ─────────────────────────────────
         let blocked_val = blocked.lock().ok().and_then(|g| *g);
-
-        // 收集 stdout / stderr
-        let stdout_bytes = stdout_thread.join().unwrap_or_default();
-        let stderr_bytes = stderr_thread.join().unwrap_or_default();
 
         // 退出码：正常退出 → ExitCode；信号杀死 → 128 + signum。
         // SAFETY：siginfo 由上面的 waitid 调用写入并填充了 si_code/si_status。
@@ -352,42 +311,11 @@ impl Sandbox for LinuxSandbox {
         } else if siginfo.si_code == libc::CLD_KILLED || siginfo.si_code == libc::CLD_DUMPED {
             128 + unsafe { siginfo.si_status() }
         } else {
-            // 未知 si_code（理论上不会发生）。fallback 到 -1。
             -1
         };
 
-        // ── 步骤 11：构造 CommandOutput ────────────────────────────
-        // 把 `blocked` 通过 BLOCKED_MARKER 前缀行写入 stderr 头部，
-        // `classify_exit` 会优先解析该标记。
-        //
-        // 消息字符串保留 `Blocked by seccomp filter (SIGSYS)` 子串，
-        // 以便既有的 `tests/seccomp_test.rs` 断言 `out.stderr.contains(
-        // "Blocked by seccomp filter (SIGSYS)")` 继续成立；同时附带
-        // `syscall='...'/category='...'/nr=.../arch=0x.../reason=blacklist/signal=SIGSYS`
-        // 富诊断字段供 Agent / log 抓取。
-        let stderr_string = match blocked_val {
-            Some((nr, arch)) => {
-                let name = seccomp::syscall_name(nr).unwrap_or("unknown");
-                let category = seccomp::syscall_by_name(name)
-                    .map(|s| s.category.tag())
-                    .unwrap_or("unknown");
-                let marker = format!(
-                    "{BLOCKED_MARKER_PREFIX}Blocked by seccomp filter (SIGSYS): \
-                     syscall='{name}' category='{category}' nr={nr} arch=0x{arch:x} \
-                     reason=blacklist signal=SIGSYS\n"
-                );
-                // marker 在前，原 stderr 在后。
-                let mut combined = marker;
-                let original = String::from_utf8_lossy(&stderr_bytes);
-                combined.push_str(&original);
-                combined
-            }
-            None => String::from_utf8_lossy(&stderr_bytes).to_string(),
-        };
-
+        // ── 步骤 10：构造 CommandOutput ───────────────────────────
         Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
-            stderr: stderr_string,
             exit_code,
             blocked_syscall: blocked_val,
         })
@@ -413,35 +341,29 @@ impl Sandbox for LinuxSandbox {
         })
     }
 
-    /// 将已完成命令的退出码、stderr 与可选的 `(nr, arch)` 归类为一个
-    /// [`ExitReason`]。
+    /// 将已完成命令的退出码与可选的 `(nr, arch)` 归类为一个 [`ExitReason`]，
+    /// 区分沙箱拒绝（Landlock、seccomp 等）与正常程序退出。
     ///
     /// 检测依据（按优先级）：
     ///
     /// 1. **`blocked` Option** → USER_NOTIF 命中黑名单（由 `execute`
-    ///    从 worker 上报的 `(nr, arch)`）。这是首选来源：直接查表得到
-    ///    syscall 名与 category，生成富诊断消息。即使 `exit_code == 0`
+    ///    从 worker 上报的 `(nr, arch)`）。即使 `exit_code == 0`
     ///    （黑名单 syscall 返回 EPERM，进程继续并正常退出）也能正确归类为
     ///    `Denied { Seccomp, rich_message }`。
-    /// 2. **BLOCKED_MARKER** → 兼容/冗余路径：解析 `execute` 写入 stderr
-    ///    头部的 marker 行（当上层只拿到 stderr、没有结构化 `blocked` 时）。
-    /// 3. **退出码 31 或 159** → SIGSYS（传统 BPF KILL 路径）。
-    /// 4. **stderr 模式** → Landlock 拒绝（EPERM/EACCES）或
-    ///    seccomp 拒绝（"Bad system call"、"SIGSYS"、"seccomp"）。
+    /// 2. **退出码 126** → Landlock 拒绝（EPERM/EACCES 无法访问文件系统）。
+    /// 3. **退出码 0** → 正常退出。
+    /// 4. **退出码 31 或 159** → SIGSYS（传统 BPF KILL 路径）。
     /// 5. **其他情况** → 普通程序退出。
     fn classify_exit(
         &self,
         exit_code: i32,
-        stderr: &str,
         blocked: Option<(u32, u32)>,
     ) -> ExitReason {
         use crate::DenyMechanism;
         use crate::ExitReason::*;
 
         // ── 优先级 1：结构化 blocked (nr, arch) ─────────────────────
-        // 首选来源。直接查表生成富诊断消息，与 `execute` 写入 stderr
-        // 的 marker 行同构（同样保留 `Blocked by seccomp filter (SIGSYS)`
-        // 子串以兼容既有断言）。即便 exit_code == 0 也命中 Denied。
+        // 首选来源。直接查表生成富诊断消息。即便 exit_code == 0 也命中 Denied。
         if let Some((nr, arch)) = blocked {
             let name = seccomp::syscall_name(nr).unwrap_or("unknown");
             let category = seccomp::syscall_by_name(name)
@@ -457,20 +379,12 @@ impl Sandbox for LinuxSandbox {
             };
         }
 
-        // ── 优先级 2：USER_NOTIF BLOCKED_MARKER（兼容/冗余）─────────
-        // 当调用方只有 stderr、没有结构化 `blocked` 时，仍能从 marker
-        // 行还原 Denied。即便 exit_code == 0 也必须命中。
-        if let Some(line) = stderr
-            .lines()
-            .find(|l| l.starts_with(BLOCKED_MARKER_PREFIX))
-        {
-            let message = line
-                .strip_prefix(BLOCKED_MARKER_PREFIX)
-                .unwrap_or(line)
-                .to_string();
+        // ── 优先级 2：退出码 126 → Denied(Landlock) ────────────────
+        // Landlock 拒绝会导致 EACCES/EPERM，某些程序在被拒绝后以 126 退出。
+        if exit_code == 126 {
             return Denied {
-                mechanism: DenyMechanism::Seccomp,
-                message,
+                mechanism: DenyMechanism::Landlock,
+                message: "Sandbox denial (Landlock): blocked by Landlock ruleset".into(),
             };
         }
 
@@ -487,40 +401,6 @@ impl Sandbox for LinuxSandbox {
             return Denied {
                 mechanism: DenyMechanism::Seccomp,
                 message: "Blocked by seccomp filter (SIGSYS)".into(),
-            };
-        }
-
-        let lower = stderr.to_lowercase();
-
-        // ── 优先级 5：Landlock 拒绝模式 ──────────────────────────────
-        // Landlock 用 EACCES 或 EPERM 阻止文件系统操作。
-        if lower.contains("operation not permitted")
-            || lower.contains("permission denied")
-            || lower.contains("eacces")
-            || lower.contains("eperm")
-        {
-            return Denied {
-                mechanism: DenyMechanism::Landlock,
-                message: format!(
-                    "Landlock blocked access: {}",
-                    stderr.lines().next().unwrap_or("unknown")
-                ),
-            };
-        }
-
-        // ── 优先级 6：Seccomp 拒绝模式 ────────────────────────────────
-        // seccomp filter 通过 audit log 或 libc/内核写到 stderr 的
-        // 消息来体现拦截。
-        if lower.contains("bad system call")
-            || lower.contains("sigsys")
-            || lower.contains("seccomp")
-        {
-            return Denied {
-                mechanism: DenyMechanism::Seccomp,
-                message: format!(
-                    "Seccomp blocked syscall: {}",
-                    stderr.lines().next().unwrap_or("unknown")
-                ),
             };
         }
 
@@ -729,51 +609,30 @@ fn recv_fd(socket_fd: RawFd) -> std::io::Result<RawFd> {
 
 /// 父进程 USER_NOTIF worker 的生命周期句柄。
 ///
-/// 通过 [`spawn_user_notif_worker`] 创建；主线程必须先调用
-/// [`UserNotifHandle::shutdown`] 唤醒 worker 阻塞的 `poll`，再调用
-/// [`UserNotifHandle::join`] 等待 worker 线程退出（`join` 内部关闭
-/// shutdown pipe 的写端）。
+/// 通过 [`spawn_user_notif_worker`] 创建。
 ///
-/// **关键不变量**：`shutdown` 必须在 `join` 之前调用；否则 worker 永远
-/// 阻塞在 `poll`（当子进程未触发黑名单 syscall 时），`join` 也跟着 hang。
+/// worker 线程在子进程退出、listener fd 收到 POLLHUP 后自然退出。
+/// 调用 [`UserNotifHandle::shutdown`] 可提前唤醒 worker 阻塞的 `poll`，
+/// [`UserNotifHandle::join`] 等待 worker 线程退出并清理资源。
+/// 若未手动 join，worker 线程在句柄 drop 时 detach。
 struct UserNotifHandle {
     /// worker 线程句柄。`join()` 取走后置 None 防止重复 join。
     worker: Option<std::thread::JoinHandle<()>>,
-    /// self-pipe 的写端（主线程持有）。`join()` 内部 `close()` 释放。
-    shutdown_w: RawFd,
 }
 
 impl UserNotifHandle {
-    /// 通知 worker 退出：写 1 字节到 self-pipe 唤醒其 `poll`。
-    ///
-    /// 即使 worker 已经在退出过程中，写入一个已无读者的 pipe 也只是
-    /// 返回 EPIPE / SIGPIPE；这里忽略错误（已经没人在乎）。
-    fn shutdown(&self) {
-        let buf = b"x";
-        // SAFETY：buf 是栈上 1 字节 `b"x"`，指针 + 长度都有效；
-        // write(2) 在 fd 仍可写时返回 1，否则返回 -1；两种情况都可接受。
-        unsafe {
-            let _ = libc::write(self.shutdown_w, buf.as_ptr() as *const _, 1);
-        }
-    }
-
-    /// 等待 worker 线程退出并释放 self-pipe 写端。
+    /// 等待 worker 线程退出。
     ///
     /// `self` by value：消费 `Option<JoinHandle>`，避免外部误用已
     /// join 的句柄二次 join。
     fn join(mut self) {
         if let Some(h) = self.worker.take() {
-            // worker 关闭 shutdown_r 与 listener_fd（OwnedFd 自动 drop）。
-            // 主线程在这里等 worker 完全退出。
             let _ = h.join();
         }
-        // SAFETY：shutdown_w 是 spawn 时 `pipe(2)` 返回的有效 fd，
-        // 在整个 handle 生命周期内由本结构体独占；join 后不再使用。
-        unsafe { libc::close(self.shutdown_w) };
     }
 }
 
-/// 创建 self-pipe 并 spawn worker 线程。
+/// Spawn worker 线程，负责响应 seccomp USER_NOTIF 通知。
 ///
 /// # 参数
 ///
@@ -783,49 +642,20 @@ impl UserNotifHandle {
 /// * `blocked` —— 共享 `(nr, arch)` 状态；worker 把每次拦截的 syscall
 ///   信息写进去，主线程在 `waitid` 后读。
 ///
-/// # 返回
-///
-/// * `Ok(UserNotifHandle)` —— 主线程持有 handle，`execute` 在
-///   `waitid` 返回后调用 `shutdown()` + `join()` 干净退出。
-///
-/// # 关键设计：self-pipe
-///
-/// worker 主循环 `poll([listener_fd, shutdown_r], -1)`：
-///
-/// * listener_fd 可读 → 处理拦截并回复 EPERM。
-/// * shutdown_r 可读 → 主线程 `waitid` 完毕，写 1 字节唤醒 worker，
-///   break 退出循环。
-///
-/// 不使用 self-pipe 时，worker 会一直阻塞在 `ioctl(RECV)`（子进程
-/// 正常退出、未触发黑名单时永远不会有 notification），主线程
-/// `worker_thread.join()` 永久卡死 → 整个 `execute` hang。
+/// worker 在 `poll(listener_fd, -1)` 中等待 notification 或 POLLHUP。
+/// 子进程退出 → listener fd POLLHUP → worker 自然退出。
 fn spawn_user_notif_worker(
     parent_sock_raw: RawFd,
     blocked: &std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>,
 ) -> std::io::Result<UserNotifHandle> {
-    // 1) 创建 self-pipe。
-    // SAFETY：pipe(2) 接受 [i32; 2] 输出数组；返回 0 成功，-1 失败。
-    let mut pipefds = [0 as RawFd; 2];
-    let ret = unsafe { libc::pipe(pipefds.as_mut_ptr()) };
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let shutdown_r = pipefds[0];
-    let shutdown_w = pipefds[1];
-
-    // 2) 把 shutdown_r 包成 OwnedFd，闭包退出时自动 close。
-    // SAFETY：shutdown_r 是 pipe(2) 返回的有效 fd。
-    let shutdown_r_owned = unsafe { OwnedFd::from_raw_fd(shutdown_r) };
     let blocked_for_worker = std::sync::Arc::clone(blocked);
 
-    // 3) spawn worker 线程。
     let worker = std::thread::spawn(move || {
-        // 3a) 收 listener fd。阻塞直到子进程 sendmsg 或子进程已死。
+        // 1) 收 listener fd。阻塞直到子进程 sendmsg 或子进程已死。
         let listener_fd_raw = match recv_fd(parent_sock_raw) {
             Ok(fd) => fd,
             Err(_e) => {
-                // 子进程未发出 listener 就退出（如 spawn 失败 / 直接被信号杀）。
-                // 这种情况没有 seccomp 命中，shutdown_r_owned 自动 drop 关闭。
+                // 子进程未发出 listener 就退出。
                 return;
             }
         };
@@ -833,87 +663,61 @@ fn spawn_user_notif_worker(
         // 移交给 OwnedFd 后由 RAII 在闭包退出时关闭。
         let listener_fd = unsafe { OwnedFd::from_raw_fd(listener_fd_raw) };
 
-        // 3b) 主循环：poll([listener_fd, shutdown_r], -1)。
-        //     - listener 可读 → 处理 notification。
-        //     - shutdown_r 可读 → 主线程通知退出。
+        // 2) 主循环：poll(listener_fd, -1)，等待 notification 或 POLLHUP。
         loop {
-            let mut pollfds = [
-                libc::pollfd {
-                    fd: listener_fd.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: shutdown_r_owned.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            // SAFETY：pollfds 是栈上 2 元素数组，poll(2) 写入 revents；
-            // timeout=-1 表示永久阻塞直到任一 fd 就绪或被信号打断。
-            let r = unsafe { libc::poll(pollfds.as_mut_ptr(), 2, -1) };
+            let mut pollfd = libc::pollfd {
+                fd: listener_fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY：timeout=-1 表示永久阻塞直到就绪或被信号打断。
+            let r = unsafe { libc::poll(&mut pollfd, 1, -1) };
             if r < 0 {
-                // poll 被信号打断（EINTR）或其他错误 → 退出循环。
-                // shutdown_r_owned 与 listener_fd 自动 drop 关闭。
                 break;
             }
-
-            // shutdown_r 可读 → 主线程通知退出。
-            if pollfds[1].revents != 0 {
-                break;
+            if pollfd.revents == 0 {
+                continue;
             }
 
             // listener_fd 可读 → 处理一条 notification。
-            if pollfds[0].revents != 0 {
-                let mut notif: seccomp::seccomp_notif = unsafe { mem::zeroed() };
-                // SAFETY：notif 栈上零初始化，ioctl 写入其内容。
-                let r = unsafe {
-                    libc::ioctl(
-                        listener_fd.as_raw_fd(),
-                        seccomp::SECCOMP_IOCTL_NOTIF_RECV,
-                        &mut notif,
-                    )
-                };
-                if r != 0 {
-                    // 子进程退出后内核自动关闭 listener 上的等待者，
-                    // 返回 ENOENT / EINVAL。视作正常退出。
-                    break;
-                }
+            let mut notif: seccomp::seccomp_notif = unsafe { mem::zeroed() };
+            let r = unsafe {
+                libc::ioctl(
+                    listener_fd.as_raw_fd(),
+                    seccomp::SECCOMP_IOCTL_NOTIF_RECV,
+                    &mut notif,
+                )
+            };
+            if r != 0 {
+                break;
+            }
 
-                // 记录 (nr, arch) 到共享变量。
-                if let Ok(mut g) = blocked_for_worker.lock() {
-                    *g = Some((notif.data.nr as u32, notif.data.arch));
-                }
+            // 记录 (nr, arch) 到共享变量。
+            if let Ok(mut g) = blocked_for_worker.lock() {
+                *g = Some((notif.data.nr as u32, notif.data.arch));
+            }
 
-                // 构造响应：error = EPERM（不调用 syscall 主体）。
-                let resp = seccomp::seccomp_notif_resp {
-                    id: notif.id,
-                    val: 0,
-                    error: libc::EPERM,
-                    flags: 0,
-                };
-                // SAFETY：resp 是栈上良构 seccomp_notif_resp；ioctl
-                // 把响应交给内核，内核根据 id 找到对应等待中的 syscall
-                // 并把 errno = EPERM 注入其返回值。
-                let r = unsafe {
-                    libc::ioctl(
-                        listener_fd.as_raw_fd(),
-                        seccomp::SECCOMP_IOCTL_NOTIF_SEND,
-                        &resp,
-                    )
-                };
-                if r != 0 {
-                    // 发送失败：notif 不存在（子进程已 reap 或 filter 卸除）。
-                    break;
-                }
+            // 回复 EPERM（不调用 syscall 主体）。
+            let resp = seccomp::seccomp_notif_resp {
+                id: notif.id,
+                val: 0,
+                error: libc::EPERM,
+                flags: 0,
+            };
+            let r = unsafe {
+                libc::ioctl(
+                    listener_fd.as_raw_fd(),
+                    seccomp::SECCOMP_IOCTL_NOTIF_SEND,
+                    &resp,
+                )
+            };
+            if r != 0 {
+                break;
             }
         }
-        // 闭包退出：listener_fd (OwnedFd) 与 shutdown_r_owned (OwnedFd)
-        // 自动 drop → close fd，无泄漏。
     });
 
     Ok(UserNotifHandle {
         worker: Some(worker),
-        shutdown_w,
     })
 }
