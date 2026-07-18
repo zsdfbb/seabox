@@ -274,37 +274,26 @@ impl Sandbox for LinuxSandbox {
             buf
         });
 
-        // ── 步骤 7：worker 线程 ──────────────────────────────────────
+        // ── 步骤 7：spawn USER_NOTIF worker + 共享 blocked ─────────
         //
         // worker 线程负责：
         // 1. 通过 `recvmsg(SCM_RIGHTS)` 从父端 socketpair 拿到 listener fd。
-        // 2. 进入循环 `ioctl(SECCOMP_IOCTL_NOTIF_RECV)`，捕获每次拦截。
-        // 3. 对每条通知用 `ioctl(SECCOMP_IOCTL_NOTIF_SEND)` 回复
-        //    `error = EPERM`，让 syscall 在子进程里直接以 errno 返回。
-        // 4. 当 socketpair 父端 EOF / 解析失败时，worker 退出。
+        // 2. 进入循环 `poll([listener_fd, shutdown_r])`：
+        //    - listener_fd 可读 → `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 读拦截
+        //      并通过 `ioctl(SECCOMP_IOCTL_NOTIF_SEND)` 回复 EPERM。
+        //    - shutdown_r 可读 → 主线程已 wait 完，写了 1 字节，break 退出。
+        //
+        // 关键：用 self-pipe 让 worker 在子进程**正常退出**（未触发黑名单）
+        // 也能立即醒来退出。原来的实现 `ioctl(RECV)` 阻塞会 hang。
         //
         // worker 把捕获到的最后一个 `(nr, arch)` 写入共享 `blocked`
         // （多个 syscall 时记录**最后一次**——黑名单每次只触发一条）。
         let blocked = std::sync::Arc::new(std::sync::Mutex::new(None::<(u32, u32)>));
-        let blocked_for_worker = std::sync::Arc::clone(&blocked);
 
-        // 把父端 socketpair 的 raw fd 抽出来传给 worker 线程，避免
-        // 把 OwnedFd 移进闭包后外面还要 drop。
+        // 把父端 socketpair 的 raw fd 抽出来传给 helper，避免
+        // 把 OwnedFd 移进闭包后外面还要 drop（helper 内部只借用 raw fd）。
         let parent_fd_raw = parent_stream.as_raw_fd();
-        let worker_thread = std::thread::spawn(move || {
-            // 收 listener fd。阻塞直到子进程 sendmsg 或子进程已死。
-            let listener_fd = match recv_fd(parent_fd_raw) {
-                Ok(fd) => fd,
-                Err(_) => return, // 子进程未发出 listener 就退出；不算 seccomp 命中。
-            };
-
-            // 进入 recv/send 循环。
-            run_user_notif_worker(listener_fd, &blocked_for_worker);
-
-            // SAFETY: listener_fd 是 recv_fd 返回的 OwnedFd 数值。
-            // 这里手动释放（recv_fd 返回 i32）。
-            unsafe { libc::close(listener_fd) };
-        });
+        let notif_handle = spawn_user_notif_worker(parent_fd_raw, &blocked)?;
 
         // ── 步骤 8：waitid(WEXITED) —— 阻塞到子进程退出 ─────────────
         //
@@ -319,10 +308,9 @@ impl Sandbox for LinuxSandbox {
         };
         if r != 0 {
             let e = std::io::Error::last_os_error();
-            // 子进程可能仍在运行；join 线程即可（管道会在 child 退出后 EOF）。
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            let _ = worker_thread.join();
+            // 子进程可能仍在运行；notify worker 退出 + join 即可。
+            notif_handle.shutdown();
+            notif_handle.join();
             // 关闭父端 socketpair（如果 worker 还没读完）。
             drop(parent_stream);
             return Err(e).with_context(|| {
@@ -333,12 +321,17 @@ impl Sandbox for LinuxSandbox {
         }
 
         // 子进程已退出。关闭父端 socketpair 让 worker 的 recvmsg 收到 EOF
-        // （如果还在阻塞），从而跳出循环。
+        // （如果还在阻塞），从而跳出循环。同时写 self-pipe 唤醒 worker，
+        // 避免 worker 卡在 poll 里——尤其在子进程未触发黑名单时，listener
+        // 永远不会有可读事件，必须靠 self-pipe 唤醒。
         drop(parent_stream);
 
-        // ── 步骤 9：读取 blocked 并 join worker ─────────────────────
+        // ── 步骤 9：通知 worker 退出 + join ───────────────────────
+        notif_handle.shutdown();
+        notif_handle.join();
+
+        // ── 步骤 10：读取 blocked ─────────────────────────────────
         let blocked_val = blocked.lock().ok().and_then(|g| *g);
-        let _ = worker_thread.join();
 
         // 收集 stdout / stderr
         let stdout_bytes = stdout_thread.join().unwrap_or_default();
@@ -355,7 +348,7 @@ impl Sandbox for LinuxSandbox {
             -1
         };
 
-        // ── 步骤 10：构造 CommandOutput ────────────────────────────
+        // ── 步骤 11：构造 CommandOutput ────────────────────────────
         // 把 `blocked` 通过 BLOCKED_MARKER 前缀行写入 stderr 头部，
         // `classify_exit` 会优先解析该标记。
         //
@@ -726,47 +719,193 @@ fn recv_fd(socket_fd: RawFd) -> std::io::Result<RawFd> {
     }
 }
 
-/// 父进程侧的 worker：循环 `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 读拦截，
-/// 对每条用 `SECCOMP_IOCTL_NOTIF_SEND` 强制回复 EPERM。
+/// 父进程 USER_NOTIF worker 的生命周期句柄。
 ///
-/// 当 listener 出现 ENOENT（子进程已退出且 filter 已卸除）或
-/// recvmsg/recv 出错时退出循环。
-fn run_user_notif_worker(
-    listener_fd: RawFd,
-    blocked: &std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>,
-) {
-    loop {
-        // 1) 读一条通知。
-        let mut notif: seccomp::seccomp_notif = unsafe { mem::zeroed() };
-        // SAFETY：notif 是栈上零初始化，ioctl 写入其内容。
-        let r = unsafe { libc::ioctl(listener_fd, seccomp::SECCOMP_IOCTL_NOTIF_RECV, &mut notif) };
-        if r != 0 {
-            // 常见：子进程退出后内核自动关闭 listener 上的等待者，
-            // 返回 ENOENT 或 EINVAL。我们视作正常退出。
-            break;
-        }
+/// 通过 [`spawn_user_notif_worker`] 创建；主线程必须先调用
+/// [`UserNotifHandle::shutdown`] 唤醒 worker 阻塞的 `poll`，再调用
+/// [`UserNotifHandle::join`] 等待 worker 线程退出（`join` 内部关闭
+/// shutdown pipe 的写端）。
+///
+/// **关键不变量**：`shutdown` 必须在 `join` 之前调用；否则 worker 永远
+/// 阻塞在 `poll`（当子进程未触发黑名单 syscall 时），`join` 也跟着 hang。
+struct UserNotifHandle {
+    /// worker 线程句柄。`join()` 取走后置 None 防止重复 join。
+    worker: Option<std::thread::JoinHandle<()>>,
+    /// self-pipe 的写端（主线程持有）。`join()` 内部 `close()` 释放。
+    shutdown_w: RawFd,
+}
 
-        // 2) 记录 (nr, arch) 到共享变量。
-        if let Ok(mut g) = blocked.lock() {
-            *g = Some((notif.data.nr as u32, notif.data.arch));
-        }
-
-        // 3) 构造响应：error = EPERM（不调用 syscall 主体）。
-        let resp = seccomp::seccomp_notif_resp {
-            id: notif.id,
-            val: 0,
-            error: libc::EPERM,
-            flags: 0,
-        };
-
-        // SAFETY：resp 是栈上的良构 seccomp_notif_resp，ioctl 把它
-        // 交给内核；内核根据 id 找到对应等待中的 syscall 并把
-        // errno = EPERM 注入其返回值。
-        let r = unsafe { libc::ioctl(listener_fd, seccomp::SECCOMP_IOCTL_NOTIF_SEND, &resp) };
-        if r != 0 {
-            // 发送失败通常意味着该 notif 已不存在（子进程已被 reap
-            // 或 filter 被卸除）。跳出循环。
-            break;
+impl UserNotifHandle {
+    /// 通知 worker 退出：写 1 字节到 self-pipe 唤醒其 `poll`。
+    ///
+    /// 即使 worker 已经在退出过程中，写入一个已无读者的 pipe 也只是
+    /// 返回 EPIPE / SIGPIPE；这里忽略错误（已经没人在乎）。
+    fn shutdown(&self) {
+        let buf = b"x";
+        // SAFETY：buf 是栈上 1 字节 `b"x"`，指针 + 长度都有效；
+        // write(2) 在 fd 仍可写时返回 1，否则返回 -1；两种情况都可接受。
+        unsafe {
+            let _ = libc::write(self.shutdown_w, buf.as_ptr() as *const _, 1);
         }
     }
+
+    /// 等待 worker 线程退出并释放 self-pipe 写端。
+    ///
+    /// `self` by value：消费 `Option<JoinHandle>`，避免外部误用已
+    /// join 的句柄二次 join。
+    fn join(mut self) {
+        if let Some(h) = self.worker.take() {
+            // worker 关闭 shutdown_r 与 listener_fd（OwnedFd 自动 drop）。
+            // 主线程在这里等 worker 完全退出。
+            let _ = h.join();
+        }
+        // SAFETY：shutdown_w 是 spawn 时 `pipe(2)` 返回的有效 fd，
+        // 在整个 handle 生命周期内由本结构体独占；join 后不再使用。
+        unsafe { libc::close(self.shutdown_w) };
+    }
+}
+
+/// 创建 self-pipe 并 spawn worker 线程。
+///
+/// # 参数
+///
+/// * `parent_sock_raw` —— socketpair 父端的 raw fd（pre_exec 中子进程
+///   通过 `sendmsg(SCM_RIGHTS)` 把 listener fd 发到这里）。worker 在
+///   自己闭包里调用 `recv_fd(parent_sock_raw)` 拿 listener。
+/// * `blocked` —— 共享 `(nr, arch)` 状态；worker 把每次拦截的 syscall
+///   信息写进去，主线程在 `waitid` 后读。
+///
+/// # 返回
+///
+/// * `Ok(UserNotifHandle)` —— 主线程持有 handle，`execute` 在
+///   `waitid` 返回后调用 `shutdown()` + `join()` 干净退出。
+///
+/// # 关键设计：self-pipe
+///
+/// worker 主循环 `poll([listener_fd, shutdown_r], -1)`：
+///
+/// * listener_fd 可读 → 处理拦截并回复 EPERM。
+/// * shutdown_r 可读 → 主线程 `waitid` 完毕，写 1 字节唤醒 worker，
+///   break 退出循环。
+///
+/// 不使用 self-pipe 时，worker 会一直阻塞在 `ioctl(RECV)`（子进程
+/// 正常退出、未触发黑名单时永远不会有 notification），主线程
+/// `worker_thread.join()` 永久卡死 → 整个 `execute` hang。
+fn spawn_user_notif_worker(
+    parent_sock_raw: RawFd,
+    blocked: &std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>,
+) -> std::io::Result<UserNotifHandle> {
+    // 1) 创建 self-pipe。
+    // SAFETY：pipe(2) 接受 [i32; 2] 输出数组；返回 0 成功，-1 失败。
+    let mut pipefds = [0 as RawFd; 2];
+    let ret = unsafe { libc::pipe(pipefds.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let shutdown_r = pipefds[0];
+    let shutdown_w = pipefds[1];
+
+    // 2) 把 shutdown_r 包成 OwnedFd，闭包退出时自动 close。
+    // SAFETY：shutdown_r 是 pipe(2) 返回的有效 fd。
+    let shutdown_r_owned = unsafe { OwnedFd::from_raw_fd(shutdown_r) };
+    let blocked_for_worker = std::sync::Arc::clone(blocked);
+
+    // 3) spawn worker 线程。
+    let worker = std::thread::spawn(move || {
+        // 3a) 收 listener fd。阻塞直到子进程 sendmsg 或子进程已死。
+        let listener_fd_raw = match recv_fd(parent_sock_raw) {
+            Ok(fd) => fd,
+            Err(_) => {
+                // 子进程未发出 listener 就退出（如 spawn 失败 / 直接被信号杀）。
+                // 这种情况没有 seccomp 命中，shutdown_r_owned 自动 drop 关闭。
+                return;
+            }
+        };
+        // SAFETY：listener_fd_raw 是 recv_fd 返回的有效 fd，
+        // 移交给 OwnedFd 后由 RAII 在闭包退出时关闭。
+        let listener_fd = unsafe { OwnedFd::from_raw_fd(listener_fd_raw) };
+
+        // 3b) 主循环：poll([listener_fd, shutdown_r], -1)。
+        //     - listener 可读 → 处理 notification。
+        //     - shutdown_r 可读 → 主线程通知退出。
+        loop {
+            let mut pollfds = [
+                libc::pollfd {
+                    fd: listener_fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: shutdown_r_owned.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // SAFETY：pollfds 是栈上 2 元素数组，poll(2) 写入 revents；
+            // timeout=-1 表示永久阻塞直到任一 fd 就绪或被信号打断。
+            let r = unsafe { libc::poll(pollfds.as_mut_ptr(), 2, -1) };
+            if r < 0 {
+                // poll 被信号打断（EINTR）或其他错误 → 退出循环。
+                // shutdown_r_owned 与 listener_fd 自动 drop 关闭。
+                break;
+            }
+
+            // shutdown_r 可读 → 主线程通知退出。
+            if pollfds[1].revents != 0 {
+                break;
+            }
+
+            // listener_fd 可读 → 处理一条 notification。
+            if pollfds[0].revents != 0 {
+                let mut notif: seccomp::seccomp_notif = unsafe { mem::zeroed() };
+                // SAFETY：notif 栈上零初始化，ioctl 写入其内容。
+                let r = unsafe {
+                    libc::ioctl(
+                        listener_fd.as_raw_fd(),
+                        seccomp::SECCOMP_IOCTL_NOTIF_RECV,
+                        &mut notif,
+                    )
+                };
+                if r != 0 {
+                    // 子进程退出后内核自动关闭 listener 上的等待者，
+                    // 返回 ENOENT / EINVAL。视作正常退出。
+                    break;
+                }
+
+                // 记录 (nr, arch) 到共享变量。
+                if let Ok(mut g) = blocked_for_worker.lock() {
+                    *g = Some((notif.data.nr as u32, notif.data.arch));
+                }
+
+                // 构造响应：error = EPERM（不调用 syscall 主体）。
+                let resp = seccomp::seccomp_notif_resp {
+                    id: notif.id,
+                    val: 0,
+                    error: libc::EPERM,
+                    flags: 0,
+                };
+                // SAFETY：resp 是栈上良构 seccomp_notif_resp；ioctl
+                // 把响应交给内核，内核根据 id 找到对应等待中的 syscall
+                // 并把 errno = EPERM 注入其返回值。
+                let r = unsafe {
+                    libc::ioctl(
+                        listener_fd.as_raw_fd(),
+                        seccomp::SECCOMP_IOCTL_NOTIF_SEND,
+                        &resp,
+                    )
+                };
+                if r != 0 {
+                    // 发送失败：notif 不存在（子进程已 reap 或 filter 卸除）。
+                    break;
+                }
+            }
+        }
+        // 闭包退出：listener_fd (OwnedFd) 与 shutdown_r_owned (OwnedFd)
+        // 自动 drop → close fd，无泄漏。
+    });
+
+    Ok(UserNotifHandle {
+        worker: Some(worker),
+        shutdown_w,
+    })
 }

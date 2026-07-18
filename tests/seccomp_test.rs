@@ -623,3 +623,65 @@ fn full_access_policy_does_not_bypass_seccomp() {
         out.stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// 回归测试：USER_NOTIF worker hang
+// ---------------------------------------------------------------------------
+
+/// 回归测试：跑一个不在黑名单的命令（/bin/true），验证 worker
+/// 能正确退出且主线程不卡死。
+///
+/// **背景：** USER_NOTIF worker 线程此前在子进程正常退出时永远阻塞
+/// 在 ioctl(NOTIF_RECV) 上，导致 wait_with_output 后 join 永久挂起。
+/// 此测试是 bug 修复后的回归保护。
+///
+/// **超时机制：** cargo test 默认有 timeout；如果 worker 真 hang，
+/// 整个测试 binary 会被 cargo 杀掉 → 测试标记为失败。
+/// 也可以在测试内显式测时：start = Instant::now()，结束后检查
+/// elapsed < 10s。
+#[test]
+fn normal_exit_does_not_hang_worker() {
+    // 选 /bin/true：每个 Linux 发行版都有；exit 0；不调任何黑名单 syscall
+    let true_path = if std::path::Path::new("/bin/true").exists() {
+        "/bin/true"
+    } else if std::path::Path::new("/usr/bin/true").exists() {
+        "/usr/bin/true"
+    } else {
+        // 容器极简环境：跳过测试
+        eprintln!("skipping normal_exit_does_not_hang_worker: no /bin/true");
+        return;
+    };
+
+    let start = std::time::Instant::now();
+    let out = run_cli(&[
+        "run",
+        "--policy",
+        "full-access",
+        "--",
+        true_path,
+    ]);
+    let elapsed = start.elapsed();
+
+    // 1. 退出码正确
+    assert_eq!(
+        out.exit_code,
+        Some(0),
+        "expected exit 0 from /bin/true, got {:?}, stderr={:?}",
+        out.exit_code,
+        out.stderr
+    );
+
+    // 2. 耗时合理（< 10s，超出则怀疑 worker hang 或其它问题）
+    assert!(
+        elapsed.as_secs() < 10,
+        "/bin/true test took too long: {:?} — worker may be hanging",
+        elapsed
+    );
+
+    // 3. 不应该有 Seccomp denial（/bin/true 不调黑名单 syscall）
+    assert!(
+        !out.stderr.contains("Sandbox denial"),
+        "unexpected sandbox denial for /bin/true: {:?}",
+        out.stderr
+    );
+}

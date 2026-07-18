@@ -259,3 +259,15 @@ cargo test --test seccomp_test
 # 跑全部并查看哪些被跳过
 cargo test -- --nocapture 2>&1 | grep skipping
 ```
+
+## 经验教训
+
+跨会话累积踩坑。详细见 [docs/learned.md](docs/learned.md)。
+
+### USER_NOTIF worker hang（2026-07-18）
+
+- **阻塞 syscall + 跨线程协调 = 死锁温床**：阻塞调用必须配中断路径（poll/timeout/signal），主线程不能 join 可能永久阻塞的 worker。
+- **集成测试覆盖 happy path**：只测"触发异常"会漏掉"异常不发生"时的协调 bug；每个端到端测试至少 1 个"正常退出"用例。
+- **代码组织影响可调试性**：内联逻辑难独立审查，提取独立 helper 后可单测。
+
+回归测试：`normal_exit_does_not_hang_worker`（跑 `/bin/true`，显式 `Instant` 测时双重防护）。
