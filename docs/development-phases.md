@@ -9,9 +9,8 @@ Phase 1 ─── Core + Linux 文件系统隔离
  └── cargo test 验证允许/拒绝路径
 
 Phase 2 ─── Linux 完整进程隔离
- ├── user_namespace（必需，netns 依赖）
+ ├── user_namespace（netns 依赖）
  ├── netns 网络阻断
- ├── setrlimit 资源限制
  └── 自定义 seccomp 策略
 
 Phase 2b ─── eBPF 云容器后端（未来扩展）

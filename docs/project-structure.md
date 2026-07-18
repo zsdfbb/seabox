@@ -26,7 +26,7 @@ sandbox-runtime-rs/
 │   │   ├── mod.rs              # LinuxSandbox 结构体 + dispatch
 │   │   ├── landlock.rs         # landlock_create_ruleset / add_rule / restrict_self
 │   │   ├── seccomp.rs          # 预编译 BPF 规则 + prctl 加载
-│   │   └── namespace.rs        # unshare(CLONE_NEW*) + setrlimit
+│   │   └── namespace.rs        # unshare(CLONE_NEWUSER/NEWNET) + netns 配置
 │   ├── macos/
 │   │   ├── mod.rs              # MacOsSandbox 结构体 + dispatch
 │   │   └── seatbelt.rs         # SBPL 模板生成 + sandbox-exec 包装

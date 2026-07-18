@@ -35,7 +35,7 @@ Agent 类编程工具（Claude Code、CodeWhale、Cursor……）会代表用户
 |---|---|---|
 | 文件系统 | 独立 rootfs（镜像） | 共享宿主机 rootfs，Landlock ACL |
 | 进程视图 | 6 个 namespace（PID 1 隔离） | 共享 `/proc`（除非用 user_ns），内核边界 |
-| 资源 | cgroup v1/v2 | setrlimit + 可选 cgroup |
+| 资源 | cgroup v1/v2 | 共享宿主机资源限制（Agent 可信场景） |
 | 启动 | 数百毫秒 + 守护进程 | 几毫秒，单个静态二进制 |
 | 适用场景 | 不可信代码、多租户 | 可信 Agent 命令、防御性加固 |
 
@@ -74,7 +74,7 @@ sandbox-runtime-rs/
 │   │   ├── mod.rs              # LinuxSandbox 结构体 + dispatch
 │   │   ├── landlock.rs         # landlock_create_ruleset / add_rule / restrict_self
 │   │   ├── seccomp.rs          # 预编译 BPF 规则 + prctl 加载
-│   │   └── namespace.rs        # unshare(CLONE_NEW*) + setrlimit
+│   │   └── namespace.rs        # unshare(CLONE_NEWUSER/NEWNET) + netns 配置
 │   ├── macos/
 │   │   ├── mod.rs              # MacOsSandbox 结构体 + dispatch
 │   │   └── seatbelt.rs         # SBPL 模板生成 + sandbox-exec 包装
@@ -101,7 +101,7 @@ sandbox-runtime-rs/
 | `src/linux/mod.rs` | `LinuxSandbox` 结构体 + dispatch |
 | `src/linux/landlock.rs` | Landlock ruleset 构造 + restrict_self |
 | `src/linux/seccomp.rs` | BPF 规则生成 + `prctl` 加载 |
-| `src/linux/namespace.rs` | `unshare(CLONE_NEW*)` + setrlimit |
+| `src/linux/namespace.rs` | `unshare(CLONE_NEWUSER/NEWNET)` + netns 配置 |
 | `src/macos/mod.rs` | `MacOsSandbox` 结构体 + dispatch |
 | `src/macos/seatbelt.rs` | SBPL 模板 + sandbox-exec wrapper |
 | `src/integration/codewhale.rs` | CodeWhale `SandboxExecutor` adapter |
@@ -186,6 +186,37 @@ echo "$out"
 ```
 
 如果误改了工程文件，立即 `git checkout <file>` 恢复。
+
+## 工作流约定（编辑批准门控）
+
+Claude 在本仓库工作时**禁止直接编辑任何文件**——必须先列出改动计划、获得开发者明确同意后才能执行。
+
+### 覆盖范围
+
+以下操作**全部**需要事先批准：
+
+- **修改文件**：`Edit`、`Write`、`NotebookEdit`，以及会改写仓库内文件的 Bash 命令（`sed -i`、`mv`、`cp` 目标在仓库路径等）
+- **新建文件**：新模板、新示例、新测试、新文档、新配置文件
+- **删除文件**：`rm` 或 `git rm`
+
+### 不需要批准
+
+- **只读操作**：`Read`、`Grep`、`Glob`、`LS`、`WebFetch`、`WebSearch`
+- **仓库外的写入**：写到 `/tmp`、tempdir 等非仓库路径
+- **git 只读操作**：`git status`、`git diff`、`git log`、`git blame`
+
+### 流程
+
+每次准备编辑前：
+
+1. **列计划**：待改文件路径 + 改动性质（新增 / 修改 / 删除）+ 改动摘要
+2. **给原因**：一句话说明必要性
+3. **明确提问**：例如「我准备修改 X、Y、Z 三个文件，可以开始吗？」
+4. **等显式确认**：开发者回复「可以」「yes」「同意」「批准」等明确指令后才动手
+
+### 批量豁免
+
+开发者若在本轮明确说「直接改」「不用问了」「全权处理」之类指令，本次会话内可放宽限制，但仍应在响应里简要说明改了什么。
 
 ## 测试
 
