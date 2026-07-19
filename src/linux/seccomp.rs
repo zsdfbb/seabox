@@ -107,11 +107,6 @@ const PR_SET_NO_NEW_PRIVS: libc::c_int = 38;
 /// `install_user_notif_filter` 直接使用字面常量。
 const SECCOMP_SET_MODE_FILTER: libc::c_uint = 1;
 
-/// `seccomp(2)` 子命令：查询 seccomp 支持的动作集合。
-///
-/// 与 `libc::SECCOMP_GET_ACTION_AVAIL` 等价。
-const SECCOMP_GET_ACTION_AVAIL: libc::c_uint = 2;
-
 /// `seccomp(SECCOMP_SET_MODE_FILTER, ...)` flag：在加载 filter 的同时
 /// 返回一个新创建的 listener fd（用于 user notification）。
 ///
@@ -396,29 +391,6 @@ pub fn is_available() -> bool {
     Path::new("/proc/sys/kernel/seccomp/actions_avail").exists()
 }
 
-/// 检查当前系统是否支持 `SECCOMP_RET_USER_NOTIF`（需要 Linux 5.0+）。
-///
-/// 通过给 `seccomp(2)` 发 `SECCOMP_GET_ACTION_AVAIL` 并要求返回
-/// `SECCOMP_RET_USER_NOTIF` 来探测。失败（不支持该 action）则返回 `false`，
-/// 调用方应退回传统 BPF 路径。
-pub fn is_user_notif_available() -> bool {
-    if !is_available() {
-        return false;
-    }
-
-    // SAFETY：seccomp(2) 即使带无效 action 也只是返回 -1/EINVAL，
-    // 不会破坏进程状态。
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_seccomp,
-            SECCOMP_GET_ACTION_AVAIL as libc::c_int,
-            0,
-            SECCOMP_RET_USER_NOTIF as libc::c_uint,
-        )
-    };
-    ret == 0
-}
-
 /// 构建 seccomp BPF 黑名单 filter，返回 `sock_filter` 指令的 Vec。
 ///
 /// 生成的程序（n = `BLACKLIST.len()`，共 n + 6 条指令）：
@@ -525,19 +497,6 @@ pub fn build_blacklist_filter() -> Vec<sock_filter> {
     );
 
     filter
-}
-
-/// 从 filter 切片构造 `sock_fprog` 结构体，供 `pre_exec` 闭包使用。
-///
-/// 返回的 `sock_fprog` 借用 filter 数据，其有效期不超过底层 `Vec` 的
-/// 生命周期。在 `pre_exec`（fork+exec 上下文）中，父进程的 `Vec` 必须
-/// 一直存活到 `spawn()` 返回；子进程获得自己的栈 COW 副本，因此指针
-/// 在 prctl 调用期间始终有效。
-pub fn build_sock_fprog(filter: &[sock_filter]) -> sock_fprog {
-    sock_fprog {
-        len: filter.len() as u16,
-        filter: filter.as_ptr(),
-    }
 }
 
 /// 在调用线程安装带 `SECCOMP_FILTER_FLAG_NEW_LISTENER` 的 BPF filter，

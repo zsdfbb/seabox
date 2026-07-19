@@ -2,8 +2,8 @@
 //!
 //! 本模块定义平台无关的抽象：
 //! - [`Sandbox`] trait（沙箱后端的主要抽象）
-//! - [`SandboxType`]、[`FsPolicy`]、[`DenyMechanism`]、[`ExitReason`]
-//! - 命令规格：[`CommandSpec`]、[`PreparedCommand`]、[`CommandOutput`]
+//! - [`FsPolicy`]、[`DenyMechanism`]、[`ExitReason`]
+//! - 命令规格：[`CommandSpec`]、[`CommandOutput`]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,20 +15,6 @@ pub mod config;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
-
-// ---------------------------------------------------------------------------
-// SandboxType
-// ---------------------------------------------------------------------------
-
-/// 标识当前使用的沙箱后端。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxType {
-    /// 不启用任何沙箱。
-    None,
-    /// Linux Landlock 文件系统 ACL（需要 Linux 5.13+）。
-    #[cfg(target_os = "linux")]
-    LinuxLandlock,
-}
 
 // ---------------------------------------------------------------------------
 // FsPolicy（核心类型，也被 config 使用）
@@ -106,7 +92,7 @@ impl ExitReason {
 
 /// 在沙箱内运行的完整命令规格。
 ///
-/// 这是 [`Sandbox::prepare`] 和 [`Sandbox::execute`] 的输入。
+/// 这是 [`Sandbox::execute`] 的输入。
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     /// 要执行的程序（路径或通过 `PATH` 解析的名称）。
@@ -121,23 +107,6 @@ pub struct CommandSpec {
     pub timeout: Duration,
     /// 该命令的文件系统策略。
     pub sandbox_policy: FsPolicy,
-}
-
-// ---------------------------------------------------------------------------
-// PreparedCommand
-// ---------------------------------------------------------------------------
-
-/// 已经为执行准备好的命令（路径已解析等）。
-#[derive(Debug, Clone)]
-pub struct PreparedCommand {
-    /// 完整的命令行（程序 + 参数）。
-    pub command: Vec<String>,
-    /// 命令的工作目录。
-    pub cwd: PathBuf,
-    /// 命令使用的环境变量。
-    pub env: HashMap<String, String>,
-    /// 命令在被杀死前的最大运行时间（wall-clock）。
-    pub timeout: Duration,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,10 +133,6 @@ pub struct CommandOutput {
 /// 各实现使用目标平台上可用的内核机制来提供文件系统隔离与系统调用过滤
 ///（例如 Linux 上的 Landlock + seccomp、macOS 上的 Seatbelt）。
 pub trait Sandbox: Send + Sync {
-    /// 准备一个 [`CommandSpec`] 以便执行，解析路径并在可以的情况下
-    /// 预先构建沙箱规则集。
-    fn prepare(&self, spec: &CommandSpec) -> anyhow::Result<PreparedCommand>;
-
     /// 在沙箱限制下执行命令，并返回其输出。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput>;
 

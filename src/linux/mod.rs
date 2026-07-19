@@ -42,7 +42,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 use crate::config::SandboxConfig;
-use crate::{CommandOutput, CommandSpec, ExitReason, PreparedCommand, Sandbox};
+use crate::{CommandOutput, CommandSpec, ExitReason, Sandbox};
 
 // ---------------------------------------------------------------------------
 // 常量（不依赖 libc 版本）
@@ -318,26 +318,6 @@ impl Sandbox for LinuxSandbox {
         Ok(CommandOutput {
             exit_code,
             blocked_syscall: blocked_val,
-        })
-    }
-
-    /// 通过解析路径并填充 [`PreparedCommand`] 来准备执行一个 [`CommandSpec`]。
-    ///
-    /// **不会** spawn 进程，也不会施加任何沙箱限制。
-    fn prepare(&self, spec: &CommandSpec) -> anyhow::Result<PreparedCommand> {
-        let mut command = vec![spec.program.clone()];
-        command.extend(spec.args.clone());
-
-        let cwd = match spec.cwd.to_str() {
-            Some(s) => PathBuf::from(crate::config::expand_tilde(s)),
-            None => spec.cwd.clone(),
-        };
-
-        Ok(PreparedCommand {
-            command,
-            cwd,
-            env: spec.env.clone(),
-            timeout: spec.timeout,
         })
     }
 
