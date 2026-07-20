@@ -6,15 +6,12 @@
 
 Agent 类编程工具（Claude Code、CodeWhale、Cursor……）会代表用户执行 shell 命令、修改文件。仅靠权限弹窗会让用户疲劳，最终形成"看见就点允许"的肌肉记忆。**内核级沙箱**以声明式方式强制执行策略：大多数命令无感放行，危险命令直接阻断，仅边缘情况弹窗。
 
-本项目是 Anthropic `@anthropic-ai/sandbox-runtime` 的 Rust 原生、零外部依赖等价实现——任何 Agent 都可作为 crate 嵌入，也可作为 CLI 直接使用。
-
 ## 特性
 
-- 🛡️ **Linux 文件系统 ACL**：基于 Landlock（5.13+），grant-only 模型
-- 🚫 **Syscall 黑名单**：基于 seccomp BPF，13 个危险 syscall（mount、ptrace、kexec、reboot、bpf 等）
+- 🛡️ **Linux 文件系统 ACL**：基于 Landlock（5.13+），grant-only 模型，支持 ABI v1-v7
+- 🚫 **Syscall 黑名单**：基于 seccomp BPF USER_NOTIF，13 个危险 syscall（mount、ptrace、kexec、reboot、bpf 等），拒绝时携带 syscall 名/分类/号/架构的富诊断消息
 - 📦 **零外部依赖**：纯 Rust + 直接 syscall，不依赖 `bwrap`、`sandbox-exec`、Docker
-- 🔌 **三种集成方式**：CLI 二进制、`pub trait Sandbox` crate API、TOML 配置
-- 🎯 **三种预设策略**：`full-access` / `read-only` / `workspace`
+- 🔌 **两种集成方式**：CLI 二进制、`pub trait Sandbox` crate API
 - 🧪 **完整测试覆盖**：87 项集成测试，覆盖所有 13 个黑名单 syscall + 所有 Landlock 限制能力
 
 ## 平台支持
@@ -63,11 +60,10 @@ sandbox-runtime check
 # Seccomp                       available
 
 # 2. 在只读沙箱里跑一个命令
-sandbox-runtime run --policy read-only -- cat /etc/passwd
+sandbox-runtime run --landlock '/:ro' -- cat /etc/passwd
 
-# 3. 用项目级 TOML 配置
-cp templates/workspace-write.toml.example .sandbox.toml
-sandbox-runtime run --config .sandbox.toml -- cargo build
+# 3. 工作区模式（/tmp 可写）
+sandbox-runtime run --landlock '/:ro' --landlock '/tmp:rw' -- sh -c 'echo data > /tmp/out.txt'
 
 # 4. 检查内核版本
 uname -r   # 需要 5.13+ 才能完整使用 Landlock
@@ -87,17 +83,15 @@ sandbox-runtime serve [--port 7878]
 |---|---|
 | `run` | 在沙箱中执行命令 |
 | `check` | 打印当前系统可用的 Landlock / seccomp 能力 |
-| `serve` | 启动 HTTP API 守护进程（Phase 1 stub，尚未实现） |
+| `serve` | 启动 HTTP API 守护进程（stub，尚未实现） |
 
 ### `run` 选项
 
 | 选项 | 说明 |
 |---|---|
-| `-c, --config FILE` | TOML 配置文件路径 |
-| `-p, --policy POLICY` | 策略预设：`full-access` / `read-only` / `workspace` |
-| `-n, --allow-network` | 放通网络访问（Phase 1 占位） |
-| `-w, --allow-write PATH` | 额外的可写路径（可重复） |
-| `-d, --debug` | 调试日志（Phase 2 占位） |
+| `--landlock <PATH:PERM>` | Landlock 路径权限规则，格式 `path:perm1[,perm2...]`（可重复）。支持预设权限组合：`ro`/`rx`(读+执行)、`rw`(读+写)、`rwx`(rw+设备创建)、`all`(全部) |
+| `-n, --allow-network` | 放通网络访问（当前占位，未生效） |
+| `-d, --debug` | 调试输出（当前占位） |
 | `--` | 分隔符，后续参数原样传给被沙箱化的命令 |
 
 ### 退出码约定
@@ -110,25 +104,19 @@ sandbox-runtime serve [--port 7878]
 | `125` | 沙箱内部错误 |
 | `126` | 沙箱拒绝（Landlock 或 seccomp） |
 
-拒绝时 stderr 会输出形如 `Sandbox denial (Landlock): Landlock blocked access: ...` 或 `Sandbox denial (Seccomp): Blocked by seccomp filter (SIGSYS): syscall='mount' category='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS` 的诊断消息。seccomp 拒绝消息会携带被拦 syscall 的名字、分类、号与架构，便于人工定位与 agent 自动归因。
+拒绝时 stderr 会输出形如 `Blocked by seccomp filter (SIGSYS): syscall='mount' category='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS` 的诊断消息。
 
 ### 常用模式
 
 ```bash
 # 只读模式（cat 可以，写全部拒绝）
-sandbox-runtime run --policy read-only -- cat /etc/passwd
+sandbox-runtime run --landlock '/:ro' -- cat /etc/passwd
 
-# 工作区模式（cwd + /tmp 可写，其余写拒绝）
-sandbox-runtime run --policy workspace -- sh -c 'echo data > out.txt'
+# 工作区模式（/tmp 可写，其余写拒绝）
+sandbox-runtime run --landlock '/:ro' --landlock '/tmp:rw' -- cargo build
 
-# 显式授予额外写路径
-sandbox-runtime run --policy workspace --allow-write /var/log/app -- go build
-
-# 使用 TOML 配置
-sandbox-runtime run --config .sandbox.toml -- cargo build
-
-# 完全绕过沙箱（危险，仅在确实需要时）
-sandbox-runtime run --policy full-access -- rm -rf ./build
+# 完全绕过沙箱（不指定 landlock）
+sandbox-runtime run -- ls -la
 
 # 使用 -- 分隔符避免 clap 解析冲突
 sandbox-runtime run -- cargo build --release
@@ -136,46 +124,47 @@ sandbox-runtime run -- cargo build --release
 
 ### ⚠️ 沙箱不会解释 shell 元字符
 
-sandbox-runtime 通过 `execve` **直接执行单个程序**，**不**经过 shell。也就是说 `>`、`>>`、`|`、`*`、`&&` 等 shell 元字符会被当作普通字符传给 `execve`，导致 spawn 以 ENOENT 失败（找不到这个"程序"）。
-
-需要 shell 语法时显式 spawn `sh -c`：
+sandbox-runtime 通过 `execve` **直接执行单个程序**，不经过 shell。`>`、`>>`、`|`、`*`、`&&` 等 shell 元字符会被当作普通字符传给 `execve`。
 
 ```bash
 # ❌ 这样会失败：spawn 找不到叫 "echo 'hello' >> README.md" 的程序
-sandbox-runtime run --policy read-only -- "echo 'hello' >> README.md"
+sandbox-runtime run -- "echo 'hello' >> README.md"
 
 # ✅ 这样才对：把整条 shell 命令作为 -c 的参数
-sandbox-runtime run --policy read-only -- sh -c "echo 'hello' >> README.md"
+sandbox-runtime run -- sh -c "echo 'hello' >> /tmp/test.out"
 ```
 
-sandbox-runtime 在 spawn 失败时会主动提示这条修改建议：
-
-```
-Error: Failed to spawn sandboxed process 'echo 'hello' >> README.md'.
-Note: sandbox-runtime does NOT interpret shell metacharacters
-(>, >>, |, *, &&, etc.) — it runs the program directly via execve.
-To use shell syntax, invoke 'sh -c' explicitly, e.g.
-`-- sh -c "your shell command here"`.
-Or split the command into separate args without shell metacharacters.
-```
+sandbox-runtime 在 spawn 失败时会主动提示这条修改建议。
 
 ## Crate API 使用
 
-作为库嵌入时，通过 `SandboxConfig` + `LinuxSandbox` + `CommandSpec` 三件套构建并执行命令。
+作为库嵌入时，通过 `SandboxConfig` + `LinuxSandbox` + `CommandSpec` 三件套。
 
 ### Builder 构造配置
 
 ```rust
 use sandbox_runtime::config::SandboxConfig;
 use sandbox_runtime::linux::LinuxSandbox;
-use sandbox_runtime::{CommandSpec, FsPolicy, Sandbox};
+use sandbox_runtime::{CommandSpec, LandlockPerm, LandlockRule, Sandbox};
 use std::time::Duration;
 
 let config = SandboxConfig::builder()
-    .policy(FsPolicy::WorkspaceWrite)
-    .allow_write(vec!["/var/log/app".to_string()])
+    .landlock(vec![
+        LandlockRule {
+            path: "/".into(),
+            perms: vec![LandlockPerm::Execute, LandlockPerm::ReadFile, LandlockPerm::ReadDir],
+        },
+        LandlockRule {
+            path: "/tmp".into(),
+            perms: vec![
+                LandlockPerm::Execute, LandlockPerm::ReadFile, LandlockPerm::ReadDir,
+                LandlockPerm::WriteFile, LandlockPerm::MakeDir, LandlockPerm::MakeReg,
+                LandlockPerm::RemoveDir, LandlockPerm::RemoveFile, LandlockPerm::Truncate,
+            ],
+        },
+    ])
     .network_enabled(false)
-    .timeout(60, 600)        // (default_secs, max_secs)
+    .timeout(60, 600)
     .build();
 
 let sandbox = LinuxSandbox { config };
@@ -193,24 +182,28 @@ let config = SandboxConfig::from_toml(".sandbox.toml")?;
 use std::collections::HashMap;
 
 let spec = CommandSpec {
-    program: "cargo".to_string(),
-    args: vec!["build".to_string(), "--release".to_string()],
+    program: "cat".to_string(),
+    args: vec!["/etc/passwd".to_string()],
     cwd: std::env::current_dir()?,
     env: HashMap::new(),
-    timeout: Duration::from_secs(60),
-    sandbox_policy: FsPolicy::WorkspaceWrite,
+    timeout: Duration::from_secs(30),
 };
 
 let output = sandbox.execute(&spec)?;
 
-println!("stdout: {}", output.stdout);
-println!("stderr: {}", output.stderr);
-println!("exit:   {}", output.exit_code);
+match sandbox.classify_exit(output.exit_code, output.blocked_syscall) {
+    ExitReason::Ok => println!("Success"),
+    ExitReason::Denied { mechanism, message } => {
+        eprintln!("Denied ({mechanism:?}): {message}");
+    }
+    ExitReason::Program(code) => eprintln!("Exit code: {code}"),
+    ExitReason::InternalError(msg) => eprintln!("Error: {msg}"),
+}
 ```
 
 ### `Sandbox` trait
 
-`LinuxSandbox` 实现平台无关的 `Sandbox` trait，未来 macOS 后端会提供 `MacOsSandbox`。集成方可以基于 trait 编写平台无关的代码：
+`LinuxSandbox` 实现平台无关的 `Sandbox` trait：
 
 ```rust
 fn run_on<T: Sandbox>(sandbox: &T, spec: &CommandSpec) -> anyhow::Result<CommandOutput> {
@@ -218,29 +211,29 @@ fn run_on<T: Sandbox>(sandbox: &T, spec: &CommandSpec) -> anyhow::Result<Command
 }
 ```
 
-完整示例见 `examples/crate_api.rs`。
+## 配置
 
-## 策略配置
+`SandboxConfig` 包含三个部分：
 
-### 三种预设策略
+```rust
+pub struct SandboxConfig {
+    pub filesystem: FilesystemConfig,  // landlock: Vec<LandlockRule>
+    pub network: NetworkConfig,        // enabled: bool
+    pub timeout: TimeoutConfig,        // default_secs, max_secs
+}
+```
 
-| 策略 | 读权限 | 写权限 | 适用场景 |
-|---|---|---|---|
-| `full-access` | 全部 | 全部 | 不应被沙箱化的命令；紧急绕过 |
-| `read-only` | 整个文件系统 | 无（全部拒绝） | 代码审查、grep、cat、analyze |
-| `workspace-write` | 整个文件系统 | `/tmp` + cwd + `--allow-write` 路径 | 默认；构建、测试、编译 |
+每条 `LandlockRule` 包含路径和一组权限。权限支持预设组合（`ro`/`rx`/`rw`/`rwx`/`all`）和 16 个个体权限。空规则列表 = 不激活 Landlock。
 
-**FullAccess** 不调用 Landlock、不施加任何规则。**ReadOnly** 处理 read+write 访问但只授予 read（实现"全部写被拒"）。**WorkspaceWrite** 在 read on `/` 之上额外授予一组写路径。
+TOML 示例：
 
-### 三种配置方式（同一份定义）
-
-#### 1. TOML 文件（推荐 — 项目级）
-
-`sandbox.toml`：
 ```toml
 [filesystem]
-policy = "workspace"
-allow_write = [".", "/tmp", "/var/log/app"]
+landlock = [
+  { path = "/", perms = ["execute", "read-file", "read-dir"] },
+  { path = "/tmp", perms = ["execute", "read-file", "read-dir", "write-file",
+    "remove-dir", "remove-file", "make-dir", "make-reg", "make-sym", "truncate"] },
+]
 
 [network]
 enabled = false
@@ -250,108 +243,58 @@ default_secs = 30
 max_secs = 300
 ```
 
-调用：`sandbox-runtime run --config sandbox.toml -- <command>`
+路径中的 `~` 前缀在运行时展开为 `$HOME`。
 
-仓库 `templates/` 目录提供三套样板：`workspace-write.toml.example`、`read-only.toml.example`、`full-access.toml.example`。
+## Project Structure
 
-#### 2. Builder Pattern（Crate API）
-
-```rust
-SandboxConfig::builder()
-    .policy(FsPolicy::WorkspaceWrite)
-    .allow_write(vec![".".to_string(), "/tmp".to_string()])
-    .network_enabled(false)
-    .timeout(30, 300)
-    .build()
 ```
+src/
+├── main.rs                 # CLI 入口（clap derive）
+├── lib.rs                  # Sandbox trait + 公共类型
+├── config.rs               # SandboxConfig + Builder
+├── linux/
+│   ├── mod.rs              # LinuxSandbox + USER_NOTIF worker
+│   ├── landlock.rs         # Landlock ruleset 构建
+│   └── seccomp.rs          # BPF 黑名单生成与 USER_NOTIF 安装
+├── bin/
+│   └── syscall_probe.rs    # 测试辅助二进制
 
-#### 3. CLI Flags（一次性场景）
-
-```bash
-sandbox-runtime \
-    --policy workspace \
-    --allow-write . \
-    --allow-write /tmp \
-    --allow-network \
-    -- <command>
+tests/          # 4 个集成测试文件（87 项）
+examples/       # 3 个 stub 示例
+docs/           # 详细设计文档
 ```
-
-### 配置优先级
-
-CLI flags 总是覆盖 TOML：
-
-- `--policy` 覆盖 `filesystem.policy`
-- `--allow-write`（任何非空列表）**完全替换** `filesystem.allow_write`（不追加）
-- `--allow-network` 总是设置 `network.enabled`（无论 TOML 是什么）
-
-### 路径展开
-
-`allow_write` 列表支持 `~` 展开为主目录（运行时执行）：
-
-```toml
-allow_write = ["~/workspace", "/tmp"]
-# 等价于
-allow_write = ["/home/<user>/workspace", "/tmp"]
-```
-
-绝对路径和不以 `~` 开头的相对路径原样使用。
 
 ## 测试
 
 ```bash
 cargo test                                    # 全部 87 项
-cargo test --test landlock_test               # 仅 Landlock（19 项）
-cargo test --test seccomp_test                # 仅 seccomp（15 项，逐 syscall 验证）
-cargo test --test config_test                 # 仅配置解析（8 项）
-cargo test bpf_blocked_by_seccomp             # 单项测试
+cargo test --test landlock_test               # 仅 Landlock
+cargo test --test seccomp_test                # 仅 seccomp（含逐 syscall 验证）
+cargo test --test config_test                 # 仅配置解析
+cargo test --test deny_detect_test            # 仅拒绝检测
 cargo test -- --nocapture                     # 显示 stdout
 ```
 
-Landlock / seccomp 测试在内核能力缺失时**自动跳过**（不是 fail）。详见 `CLAUDE.md` 的 "测试" 章节。
-
-## 项目结构
-
-```
-src/
-├── main.rs                 # CLI 入口
-├── lib.rs                  # Sandbox trait + 公共类型
-├── config.rs               # SandboxConfig + Builder
-├── linux/
-│   ├── mod.rs              # LinuxSandbox + pre_exec 编排
-│   ├── landlock.rs         # Landlock ruleset 构造
-│   └── seccomp.rs          # BPF 黑名单生成与加载
-├── bin/
-│   └── syscall_probe.rs    # 测试辅助二进制
-├── macos/                  # Phase 3（计划中）
-├── integration/            # CodeWhale adapter
-└── api/                    # HTTP API（Phase 3 stub）
-
-tests/                      # 集成测试
-examples/                   # 可运行示例
-templates/                  # TOML 配置样板
-docs/                       # 详细设计文档
-```
+Landlock / seccomp 测试在内核能力缺失时**自动跳过**（不是 fail）。
 
 ## 路线图
 
 | Phase | 内容 | 状态 |
 |---|---|---|
-| 1 | Core + Linux 文件系统隔离（Landlock + seccomp + CLI） | ✅ |
-| 2 | Linux 完整进程隔离（user_ns + netns + 自定义 seccomp） | 🚧 |
-| 2b | eBPF 云容器后端（aya + cgroup_sock_addr） | 🚧 |
-| 3 | macOS 支持（Seatbelt） | 🚧 |
-| 4 | CodeWhale 集成 + HTTP API（OpenSandbox v1 兼容）| 🚧 |
+| 1 | Core + Linux 文件系统隔离（Landlock + seccomp + CLI） | ✅ 已完成 |
+| 2 | Linux 完整进程隔离（user_ns + netns + 动态 seccomp） | 🚧 进行中 |
+| 2b | eBPF 云容器后端（aya + cgroup_sock_addr） | 💡 计划中 |
+| 3 | macOS 支持（Seatbelt） | 💡 计划中 |
+| 4 | CodeWhale 集成 + HTTP API | 💡 计划中 |
 
 ## 已知限制（Phase 1）
 
 - **超时未实现**：`CommandSpec::timeout` 被收集但不强制执行。
-- **网络未真正隔离**：`--allow-network` / `network.enabled` 是占位，未来通过 netns 或 eBPF 实现。
+- **网络未真正隔离**：`--allow-network` 是占位，未来通过 netns 实现。
 - **`serve` 子命令未实现**：HTTP API 是 stub。
-- **macOS 未实现**：`LinuxSandbox` 之外的平台不支持。
-- **`deny_read` 未实现**：Landlock grant-only 模型下，"已 grant 读后再 deny 子路径" 需要 Phase 2 用 bind mount 实现。
+- **macOS 未实现**：仅 Linux 后端可用。
+- **无高层策略预设**：当前需用户逐条指定 `--landlock` 规则。
 
 ## 许可
 
 MIT — 详见 [LICENSE](LICENSE)。
-
-集成方请注意许可证兼容性：MIT 允许商用、修改、私用、再分发，但需要保留版权声明。
