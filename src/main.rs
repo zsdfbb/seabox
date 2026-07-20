@@ -124,7 +124,13 @@ fn cmd_run(
             eprintln!("Sandbox denial ({mechanism:?}): {message}");
             std::process::exit(126)
         }
-        ExitReason::Program(code) => std::process::exit(code),
+        ExitReason::Program(code) => {
+            if code != 0 {
+                eprintln!("[sandbox-runtime] command failed (exit code {code}) under policy \"{:?}\"",
+                    sandbox.config.filesystem.policy);
+            }
+            std::process::exit(code)
+        }
         ExitReason::InternalError(msg) => {
             eprintln!("Internal error: {msg}");
             std::process::exit(125)
