@@ -974,3 +974,67 @@ fn zzz_flush_stdout_marker() {
     std::io::stdout().flush().unwrap();
     std::io::stderr().flush().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// --landlock flag 解析测试
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cli_landlock_ro_blocks_write() {
+    if skip_unless_landlock_active() { return; }
+    let out = run_cli(&[
+        "run", "--landlock", "/:ro", "--", "sh", "-c",
+        "echo hi > /tmp/.sandbox_ll_ro_test",
+    ]);
+    assert_eq!(
+        out.exit_code, Some(2),
+        "ro 模式下写 /tmp 应被拒绝, stderr={:?}", out.stderr
+    );
+}
+
+#[test]
+fn cli_landlock_rw_allows_write() {
+    if skip_unless_landlock_active() { return; }
+    let target = format!("/tmp/.sandbox_ll_rw_test");
+    let out = run_cli(&[
+        "run", "--landlock", "/:ro", "--landlock", "/tmp:rw", "--", "sh", "-c",
+        &format!("echo hi > {target}"),
+    ]);
+    assert_eq!(
+        out.exit_code, Some(0),
+        "ro+/tmp:rw 模式下写 /tmp 应允许, stderr={:?}", out.stderr
+    );
+    let _ = std::fs::remove_file(&target);
+}
+
+#[test]
+fn cli_landlock_all_allows_ioctl_dev() {
+    if skip_unless_landlock_active() { return; }
+    // all 应包含 refer + ioctl-dev；简单验证 exit_code 正常
+    let out = run_cli(&[
+        "run", "--landlock", "/tmp:all", "--", "sh", "-c",
+        "echo ok",
+    ]);
+    assert_eq!(
+        out.exit_code, Some(0),
+        "all 模式下运行基本命令应成功, stderr={:?}", out.stderr
+    );
+}
+
+#[test]
+fn cli_landlock_multiple_rules_combined() {
+    if skip_unless_landlock_active() { return; }
+    let target = format!("/tmp/.sandbox_ll_multi_test");
+    let out = run_cli(&[
+        "run",
+        "--landlock", "/etc:ro",
+        "--landlock", "/tmp:rw",
+        "--", "sh", "-c",
+        &format!("echo ok > {target} && cat /etc/hostname > /dev/null"),
+    ]);
+    assert_eq!(
+        out.exit_code, Some(0),
+        "多规则组合应正常工作, stderr={:?}", out.stderr
+    );
+    let _ = std::fs::remove_file(&target);
+}
