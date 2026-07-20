@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use landlock::{
-    Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreated,
+    Access, AccessFs, BitFlags, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreated,
     RulesetCreatedAttr, path_beneath_rules, ABI,
 };
 
@@ -160,10 +160,25 @@ pub fn build_ruleset(
             rule.path.clone()
         };
 
-        let mut access = read_access; // 至少能读
+        let mut access: BitFlags<AccessFs> = BitFlags::EMPTY;
         for perm in &rule.perms {
-            if let LandlockPerm::Rw = perm {
-                access = access | write_access;
+            match perm {
+                LandlockPerm::Execute => access = access | AccessFs::Execute,
+                LandlockPerm::ReadFile => access = access | AccessFs::ReadFile,
+                LandlockPerm::ReadDir => access = access | AccessFs::ReadDir,
+                LandlockPerm::WriteFile => access = access | AccessFs::WriteFile,
+                LandlockPerm::RemoveDir => access = access | AccessFs::RemoveDir,
+                LandlockPerm::RemoveFile => access = access | AccessFs::RemoveFile,
+                LandlockPerm::MakeChar => access = access | AccessFs::MakeChar,
+                LandlockPerm::MakeDir => access = access | AccessFs::MakeDir,
+                LandlockPerm::MakeReg => access = access | AccessFs::MakeReg,
+                LandlockPerm::MakeSock => access = access | AccessFs::MakeSock,
+                LandlockPerm::MakeFifo => access = access | AccessFs::MakeFifo,
+                LandlockPerm::MakeBlock => access = access | AccessFs::MakeBlock,
+                LandlockPerm::MakeSym => access = access | AccessFs::MakeSym,
+                LandlockPerm::Refer => access = access | AccessFs::Refer,
+                LandlockPerm::Truncate => access = access | AccessFs::Truncate,
+                LandlockPerm::IoctlDev => access = access | AccessFs::IoctlDev,
             }
         }
         ruleset = ruleset.add_rules(path_beneath_rules([&path], access))?;
@@ -210,7 +225,11 @@ mod tests {
     fn test_build_ruleset_read_only_returns_ruleset() {
         let rules = vec![LandlockRule {
             path: "/".into(),
-            perms: vec![LandlockPerm::Ro],
+            perms: vec![
+                LandlockPerm::Execute,
+                LandlockPerm::ReadFile,
+                LandlockPerm::ReadDir,
+            ],
         }];
         let result = build_ruleset(&rules, Path::new("/"));
         assert!(
@@ -229,7 +248,18 @@ mod tests {
     fn test_build_ruleset_with_rules_returns_ruleset() {
         let rules = vec![LandlockRule {
             path: "/tmp".into(),
-            perms: vec![LandlockPerm::Rw],
+            perms: vec![
+                LandlockPerm::Execute,
+                LandlockPerm::ReadFile,
+                LandlockPerm::ReadDir,
+                LandlockPerm::WriteFile,
+                LandlockPerm::RemoveDir,
+                LandlockPerm::RemoveFile,
+                LandlockPerm::MakeDir,
+                LandlockPerm::MakeReg,
+                LandlockPerm::MakeSym,
+                LandlockPerm::Truncate,
+            ],
         }];
         let result = build_ruleset(&rules, Path::new("/tmp"));
         assert!(
@@ -246,10 +276,27 @@ mod tests {
 
     #[test]
     fn test_build_ruleset_multiple_rules() {
+        let rw_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ];
+        let ro_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ];
         let rules = vec![
-            LandlockRule { path: "/tmp".into(), perms: vec![LandlockPerm::Rw] },
-            LandlockRule { path: "/usr".into(), perms: vec![LandlockPerm::Ro] },
-            LandlockRule { path: "/etc".into(), perms: vec![LandlockPerm::Ro] },
+            LandlockRule { path: "/tmp".into(), perms: rw_perms },
+            LandlockRule { path: "/usr".into(), perms: ro_perms.clone() },
+            LandlockRule { path: "/etc".into(), perms: ro_perms },
         ];
         let result = build_ruleset(&rules, Path::new("/tmp"));
         assert!(result.is_ok());
@@ -258,14 +305,31 @@ mod tests {
 
     #[test]
     fn test_build_ruleset_non_existent_paths_skipped() {
+        let ro_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ];
+        let rw_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ];
         let rules = vec![
             LandlockRule {
                 path: "/this/path/should/not/exist/abc123xyz".into(),
-                perms: vec![LandlockPerm::Ro],
+                perms: ro_perms,
             },
             LandlockRule {
                 path: "/tmp".into(),
-                perms: vec![LandlockPerm::Rw],
+                perms: rw_perms,
             },
         ];
         let result = build_ruleset(&rules, Path::new("/tmp"));
@@ -275,9 +339,21 @@ mod tests {
 
     #[test]
     fn test_dedup_paths() {
+        let rw_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ];
         let rules = vec![
-            LandlockRule { path: "/tmp".into(), perms: vec![LandlockPerm::Rw] },
-            LandlockRule { path: "/tmp".into(), perms: vec![LandlockPerm::Rw] },
+            LandlockRule { path: "/tmp".into(), perms: rw_perms.clone() },
+            LandlockRule { path: "/tmp".into(), perms: rw_perms },
         ];
         let result = build_ruleset(&rules, Path::new("/tmp"));
         assert!(result.is_ok());
@@ -288,7 +364,18 @@ mod tests {
     fn test_build_ruleset_for_missing_cwd() {
         let rules = vec![LandlockRule {
             path: "/tmp".into(),
-            perms: vec![LandlockPerm::Rw],
+            perms: vec![
+                LandlockPerm::Execute,
+                LandlockPerm::ReadFile,
+                LandlockPerm::ReadDir,
+                LandlockPerm::WriteFile,
+                LandlockPerm::RemoveDir,
+                LandlockPerm::RemoveFile,
+                LandlockPerm::MakeDir,
+                LandlockPerm::MakeReg,
+                LandlockPerm::MakeSym,
+                LandlockPerm::Truncate,
+            ],
         }];
         let result = build_ruleset(&rules, Path::new("/nonexistent_cwd_xyz"));
         assert!(result.is_ok());

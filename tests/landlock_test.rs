@@ -190,9 +190,26 @@ fn workspace_write_allows_write() {
     let dir_path = dir.path().to_path_buf();
 
     // WorkspaceWrite: RO on /, RW on cwd
+    let ro_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+    ];
+    let rw_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+        LandlockPerm::WriteFile,
+        LandlockPerm::RemoveDir,
+        LandlockPerm::RemoveFile,
+        LandlockPerm::MakeDir,
+        LandlockPerm::MakeReg,
+        LandlockPerm::MakeSym,
+        LandlockPerm::Truncate,
+    ];
     let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
-        LandlockRule { path: dir_path.clone(), perms: vec![LandlockPerm::Rw] },
+        LandlockRule { path: "/".into(), perms: ro_perms },
+        LandlockRule { path: dir_path.clone(), perms: rw_perms },
     ]);
     let spec = CommandSpec {
         program: "sh".to_string(),
@@ -269,8 +286,13 @@ fn read_only_blocks_write() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
 
+    let ro_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+    ];
     let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
+        LandlockRule { path: "/".into(), perms: ro_perms },
     ]);
     let spec = CommandSpec {
         program: "sh".to_string(),
@@ -603,9 +625,26 @@ fn workspace_write_grants_allow_write_path() {
     let granted_dir = unique_path_in_var_tmp("libapi_allow_granted");
     std::fs::create_dir_all(&granted_dir).expect("failed to create granted dir");
 
+    let ro_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+    ];
+    let rw_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+        LandlockPerm::WriteFile,
+        LandlockPerm::RemoveDir,
+        LandlockPerm::RemoveFile,
+        LandlockPerm::MakeDir,
+        LandlockPerm::MakeReg,
+        LandlockPerm::MakeSym,
+        LandlockPerm::Truncate,
+    ];
     let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
-        LandlockRule { path: granted_dir.clone(), perms: vec![LandlockPerm::Rw] },
+        LandlockRule { path: "/".into(), perms: ro_perms },
+        LandlockRule { path: granted_dir.clone(), perms: rw_perms },
     ]);
 
     let target = granted_dir.join("written_file");
@@ -648,9 +687,26 @@ fn workspace_write_does_not_grant_unlisted_path() {
     std::fs::create_dir_all(&other_dir).expect("failed to create other dir");
 
     // 只授权 granted_dir，不授权 other_dir。
+    let ro_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+    ];
+    let rw_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+        LandlockPerm::WriteFile,
+        LandlockPerm::RemoveDir,
+        LandlockPerm::RemoveFile,
+        LandlockPerm::MakeDir,
+        LandlockPerm::MakeReg,
+        LandlockPerm::MakeSym,
+        LandlockPerm::Truncate,
+    ];
     let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
-        LandlockRule { path: granted_dir.clone(), perms: vec![LandlockPerm::Rw] },
+        LandlockRule { path: "/".into(), perms: ro_perms },
+        LandlockRule { path: granted_dir.clone(), perms: rw_perms },
     ]);
 
     let target = other_dir.join("should_be_blocked");

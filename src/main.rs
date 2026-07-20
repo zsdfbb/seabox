@@ -206,10 +206,71 @@ fn parse_landlock_spec(s: &str) -> anyhow::Result<LandlockRule> {
     })?;
     let perms = perms_str
         .split(',')
-        .map(|p| p.parse::<LandlockPerm>())
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .flat_map(expand_perm)
+        .collect();
     Ok(LandlockRule {
         path: path.into(),
         perms,
     })
+}
+
+/// 将权限字符串展开为个体权限列表。
+///
+/// 预设组合（`ro`/`rx`、`rw`、`rwx`、`all`）会被展开为对应的个体权限；
+/// 个体权限名直接解析为 [`LandlockPerm`] 单元素向量。
+fn expand_perm(s: &str) -> Vec<LandlockPerm> {
+    match s {
+        "ro" | "rx" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ],
+        "rw" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ],
+        "rwx" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+            LandlockPerm::MakeSock,
+            LandlockPerm::MakeFifo,
+            LandlockPerm::MakeBlock,
+            LandlockPerm::MakeChar,
+        ],
+        "all" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+            LandlockPerm::MakeSock,
+            LandlockPerm::MakeFifo,
+            LandlockPerm::MakeBlock,
+            LandlockPerm::MakeChar,
+            LandlockPerm::Refer,
+            LandlockPerm::IoctlDev,
+        ],
+        other => vec![other.parse::<LandlockPerm>().unwrap()],
+    }
 }

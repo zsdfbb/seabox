@@ -20,32 +20,51 @@ pub mod linux;
 // LandlockPerm + LandlockRule
 // ---------------------------------------------------------------------------
 
-/// Landlock 路径权限。
+/// Landlock 路径权限，对应内核 `AccessFs` 的个体权限。
+///
+/// 预设组合（如 `ro`、`rw`、`rwx`、`all`）在 CLI 层通过
+/// [`expand_perm`](crate::config::expand_perm) 展开，不在此枚举中。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LandlockPerm {
-    Ro,
-    Rw,
-    Exec,
+    Execute,
+    ReadFile,
+    ReadDir,
+    WriteFile,
+    RemoveDir,
+    RemoveFile,
+    MakeChar,
+    MakeDir,
+    MakeReg,
+    MakeSock,
+    MakeFifo,
+    MakeBlock,
+    MakeSym,
     Refer,
     Truncate,
     IoctlDev,
-    TcpBind,
-    TcpConnect,
 }
 
 impl std::str::FromStr for LandlockPerm {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "ro" => Ok(LandlockPerm::Ro),
-            "rw" => Ok(LandlockPerm::Rw),
-            "exec" => Ok(LandlockPerm::Exec),
+            "execute" => Ok(LandlockPerm::Execute),
+            "read-file" => Ok(LandlockPerm::ReadFile),
+            "read-dir" => Ok(LandlockPerm::ReadDir),
+            "write-file" => Ok(LandlockPerm::WriteFile),
+            "remove-dir" => Ok(LandlockPerm::RemoveDir),
+            "remove-file" => Ok(LandlockPerm::RemoveFile),
+            "make-char" => Ok(LandlockPerm::MakeChar),
+            "make-dir" => Ok(LandlockPerm::MakeDir),
+            "make-reg" => Ok(LandlockPerm::MakeReg),
+            "make-sock" => Ok(LandlockPerm::MakeSock),
+            "make-fifo" => Ok(LandlockPerm::MakeFifo),
+            "make-block" => Ok(LandlockPerm::MakeBlock),
+            "make-sym" => Ok(LandlockPerm::MakeSym),
             "refer" => Ok(LandlockPerm::Refer),
             "truncate" => Ok(LandlockPerm::Truncate),
             "ioctl-dev" => Ok(LandlockPerm::IoctlDev),
-            "tcp-bind" => Ok(LandlockPerm::TcpBind),
-            "tcp-connect" => Ok(LandlockPerm::TcpConnect),
             _ => anyhow::bail!("unknown landlock perm '{s}'"),
         }
     }

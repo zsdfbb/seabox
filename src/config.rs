@@ -22,7 +22,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{LandlockPerm, LandlockRule};
+use crate::LandlockRule;
+
+#[cfg(test)]
+use crate::LandlockPerm;
 
 // ---------------------------------------------------------------------------
 // SandboxConfig
@@ -283,11 +286,28 @@ mod tests {
 
     #[test]
     fn test_builder_roundtrip() {
+        let ro_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ];
+        let rw_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ];
         let config = SandboxConfig::builder()
             .landlock(vec![
-                LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
-                LandlockRule { path: "/tmp".into(), perms: vec![LandlockPerm::Rw] },
-                LandlockRule { path: "./output".into(), perms: vec![LandlockPerm::Rw] },
+                LandlockRule { path: "/".into(), perms: ro_perms.clone() },
+                LandlockRule { path: "/tmp".into(), perms: rw_perms.clone() },
+                LandlockRule { path: "./output".into(), perms: rw_perms },
             ])
             .network_enabled(true)
             .timeout(60, 600)
@@ -295,9 +315,7 @@ mod tests {
 
         assert_eq!(config.filesystem.landlock.len(), 3);
         assert_eq!(config.filesystem.landlock[0].path, PathBuf::from("/"));
-        assert_eq!(config.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
-        assert_eq!(config.filesystem.landlock[1].perms, vec![LandlockPerm::Rw]);
-        assert_eq!(config.filesystem.landlock[2].perms, vec![LandlockPerm::Rw]);
+        assert_eq!(config.filesystem.landlock[0].perms, ro_perms);
         assert!(config.network.enabled);
         assert_eq!(config.timeout.default_secs, 60);
         assert_eq!(config.timeout.max_secs, 600);
@@ -330,11 +348,28 @@ mod tests {
 
     #[test]
     fn test_toml_roundtrip() {
+        let ro_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ];
+        let rw_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ];
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 landlock: vec![
-                    LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
-                    LandlockRule { path: "/data".into(), perms: vec![LandlockPerm::Rw] },
+                    LandlockRule { path: "/".into(), perms: ro_perms.clone() },
+                    LandlockRule { path: "/data".into(), perms: rw_perms.clone() },
                 ],
             },
             network: NetworkConfig { enabled: false },
@@ -349,8 +384,8 @@ mod tests {
             toml::from_str(&toml_str).expect("deserialisation should succeed");
 
         assert_eq!(deserialised.filesystem.landlock.len(), 2);
-        assert_eq!(deserialised.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
-        assert_eq!(deserialised.filesystem.landlock[1].perms, vec![LandlockPerm::Rw]);
+        assert_eq!(deserialised.filesystem.landlock[0].perms, ro_perms);
+        assert_eq!(deserialised.filesystem.landlock[1].perms, rw_perms);
         assert!(!deserialised.network.enabled);
         assert_eq!(deserialised.timeout.default_secs, 60);
         assert_eq!(deserialised.timeout.max_secs, 600);
@@ -358,9 +393,29 @@ mod tests {
 
     #[test]
     fn test_toml_deserialize_landlock() {
+        let ro_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ];
+        let rw_perms = vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ];
         let toml_str = r#"
 [filesystem]
-landlock = [{ path = "/", perms = ["ro"] }, { path = "/tmp", perms = ["rw"] }]
+landlock = [
+  { path = "/", perms = ["execute", "read-file", "read-dir"] },
+  { path = "/tmp", perms = ["execute", "read-file", "read-dir", "write-file", "remove-dir", "remove-file", "make-dir", "make-reg", "make-sym", "truncate"] },
+]
 
 [network]
 enabled = true
@@ -371,8 +426,8 @@ max_secs = 120
 "#;
         let config: SandboxConfig = toml::from_str(toml_str).expect("TOML should parse");
         assert_eq!(config.filesystem.landlock.len(), 2);
-        assert_eq!(config.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
-        assert_eq!(config.filesystem.landlock[1].perms, vec![LandlockPerm::Rw]);
+        assert_eq!(config.filesystem.landlock[0].perms, ro_perms);
+        assert_eq!(config.filesystem.landlock[1].perms, rw_perms);
         assert!(config.network.enabled);
         assert_eq!(config.timeout.default_secs, 10);
         assert_eq!(config.timeout.max_secs, 120);
@@ -404,7 +459,18 @@ landlock = [{ path = "/", perms = ["invalid-perm"] }]
         let config = SandboxConfig::builder()
             .landlock(vec![LandlockRule {
                 path: "~/workspace".into(),
-                perms: vec![LandlockPerm::Rw],
+                perms: vec![
+                    LandlockPerm::Execute,
+                    LandlockPerm::ReadFile,
+                    LandlockPerm::ReadDir,
+                    LandlockPerm::WriteFile,
+                    LandlockPerm::RemoveDir,
+                    LandlockPerm::RemoveFile,
+                    LandlockPerm::MakeDir,
+                    LandlockPerm::MakeReg,
+                    LandlockPerm::MakeSym,
+                    LandlockPerm::Truncate,
+                ],
             }])
             .build();
         assert_eq!(

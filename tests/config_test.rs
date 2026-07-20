@@ -26,26 +26,43 @@ landlock = []
 
 #[test]
 fn test_toml_read_only() {
+    let ro_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+    ];
     let toml_str = r#"
 [filesystem]
-landlock = [{ path = "/", perms = ["ro"] }]
+landlock = [{ path = "/", perms = ["execute", "read-file", "read-dir"] }]
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.filesystem.landlock.len(), 1);
-    assert_eq!(config.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
+    assert_eq!(config.filesystem.landlock[0].perms, ro_perms);
 }
 
 #[test]
 fn test_toml_workspace_write() {
+    let perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+        LandlockPerm::WriteFile,
+        LandlockPerm::RemoveDir,
+        LandlockPerm::RemoveFile,
+        LandlockPerm::MakeDir,
+        LandlockPerm::MakeReg,
+        LandlockPerm::MakeSym,
+        LandlockPerm::Truncate,
+    ];
     let toml_str = r#"
 [filesystem]
-landlock = [{ path = "/", perms = ["ro", "rw"] }]
+landlock = [{ path = "/", perms = ["execute", "read-file", "read-dir", "write-file", "remove-dir", "remove-file", "make-dir", "make-reg", "make-sym", "truncate"] }]
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.filesystem.landlock.len(), 1);
     assert_eq!(
         config.filesystem.landlock[0].perms,
-        vec![LandlockPerm::Ro, LandlockPerm::Rw]
+        perms
     );
 }
 
@@ -55,10 +72,15 @@ landlock = [{ path = "/", perms = ["ro", "rw"] }]
 
 #[test]
 fn test_builder_matches_toml() {
+    let ro_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+    ];
     let builder_config = SandboxConfig::builder()
         .landlock(vec![LandlockRule {
             path: "/".into(),
-            perms: vec![LandlockPerm::Ro],
+            perms: ro_perms.clone(),
         }])
         .network_enabled(true)
         .timeout(60, 600)
@@ -66,7 +88,7 @@ fn test_builder_matches_toml() {
 
     let toml_str = r#"
 [filesystem]
-landlock = [{ path = "/", perms = ["ro"] }]
+landlock = [{ path = "/", perms = ["execute", "read-file", "read-dir"] }]
 
 [network]
 enabled = true
@@ -177,10 +199,22 @@ landlock = []
 
 #[test]
 fn test_toml_round_trip() {
+    let rw_perms = vec![
+        LandlockPerm::Execute,
+        LandlockPerm::ReadFile,
+        LandlockPerm::ReadDir,
+        LandlockPerm::WriteFile,
+        LandlockPerm::RemoveDir,
+        LandlockPerm::RemoveFile,
+        LandlockPerm::MakeDir,
+        LandlockPerm::MakeReg,
+        LandlockPerm::MakeSym,
+        LandlockPerm::Truncate,
+    ];
     let original = SandboxConfig::builder()
         .landlock(vec![LandlockRule {
             path: "/data".into(),
-            perms: vec![LandlockPerm::Rw],
+            perms: rw_perms.clone(),
         }])
         .network_enabled(false)
         .timeout(60, 600)
