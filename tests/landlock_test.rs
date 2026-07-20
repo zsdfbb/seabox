@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use sandbox_runtime::config::SandboxConfig;
 use sandbox_runtime::linux::LinuxSandbox;
-use sandbox_runtime::{CommandSpec, FsPolicy, Sandbox};
+use sandbox_runtime::{CommandSpec, LandlockPerm, LandlockRule, Sandbox};
 
 /// 检查运行中的内核是否支持 Landlock。
 fn is_landlock_available() -> bool {
@@ -189,14 +189,17 @@ fn workspace_write_allows_write() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
 
-    let sandbox = make_sandbox();
+    // WorkspaceWrite: RO on /, RW on cwd
+    let sandbox = make_sandbox_with_landlock(vec![
+        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
+        LandlockRule { path: dir_path.clone(), perms: vec![LandlockPerm::Rw] },
+    ]);
     let spec = CommandSpec {
         program: "sh".to_string(),
         args: vec!["-c".to_string(), "echo ok > test.txt".to_string()],
         cwd: dir_path.clone(),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::WorkspaceWrite,
     };
 
     let output = sandbox
@@ -235,7 +238,6 @@ fn full_access_bypasses_landlock() {
         cwd: dir_path.clone(),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::FullAccess,
     };
 
     let output = sandbox
@@ -267,14 +269,15 @@ fn read_only_blocks_write() {
     let dir = tempfile::tempdir().unwrap();
     let dir_path = dir.path().to_path_buf();
 
-    let sandbox = make_sandbox();
+    let sandbox = make_sandbox_with_landlock(vec![
+        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
+    ]);
     let spec = CommandSpec {
         program: "sh".to_string(),
         args: vec!["-c".to_string(), "echo ok > test.txt".to_string()],
         cwd: dir_path.clone(),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::ReadOnly,
     };
 
     let output = sandbox
@@ -477,13 +480,12 @@ fn cli_check_reports_landlock_available() {
 // 所有会真的写入主机的测试都走预检 + PID 化路径 + best-effort 清理。
 
 /// 用指定策略 + allow_write 列表构造 LinuxSandbox，用于库 API 测试。
-fn make_sandbox_with_policy(policy: FsPolicy, allow_write: Vec<String>) -> LinuxSandbox {
+fn make_sandbox_with_landlock(rules: Vec<LandlockRule>) -> LinuxSandbox {
     use sandbox_runtime::config::FilesystemConfig;
     LinuxSandbox {
         config: SandboxConfig {
             filesystem: FilesystemConfig {
-                policy,
-                allow_write,
+                landlock: rules,
             },
             ..Default::default()
         },
@@ -508,7 +510,7 @@ fn read_only_allows_read() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::ReadOnly,
+
     };
 
     let output = sandbox
@@ -542,7 +544,7 @@ fn workspace_write_allows_write_to_tmp() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::WorkspaceWrite,
+
     };
 
     let output = sandbox
@@ -574,7 +576,7 @@ fn workspace_write_allows_read_anywhere() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::WorkspaceWrite,
+
     };
 
     let output = sandbox
@@ -601,10 +603,10 @@ fn workspace_write_grants_allow_write_path() {
     let granted_dir = unique_path_in_var_tmp("libapi_allow_granted");
     std::fs::create_dir_all(&granted_dir).expect("failed to create granted dir");
 
-    let sandbox = make_sandbox_with_policy(
-        FsPolicy::WorkspaceWrite,
-        vec![granted_dir.to_string_lossy().to_string()],
-    );
+    let sandbox = make_sandbox_with_landlock(vec![
+        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
+        LandlockRule { path: granted_dir.clone(), perms: vec![LandlockPerm::Rw] },
+    ]);
 
     let target = granted_dir.join("written_file");
     let cmd = format!("echo ok > {}", target.display());
@@ -614,7 +616,7 @@ fn workspace_write_grants_allow_write_path() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::WorkspaceWrite,
+
     };
 
     let output = sandbox
@@ -646,10 +648,10 @@ fn workspace_write_does_not_grant_unlisted_path() {
     std::fs::create_dir_all(&other_dir).expect("failed to create other dir");
 
     // 只授权 granted_dir，不授权 other_dir。
-    let sandbox = make_sandbox_with_policy(
-        FsPolicy::WorkspaceWrite,
-        vec![granted_dir.to_string_lossy().to_string()],
-    );
+    let sandbox = make_sandbox_with_landlock(vec![
+        LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
+        LandlockRule { path: granted_dir.clone(), perms: vec![LandlockPerm::Rw] },
+    ]);
 
     let target = other_dir.join("should_be_blocked");
     let cmd = format!("echo blocked > {}", target.display());
@@ -659,7 +661,7 @@ fn workspace_write_does_not_grant_unlisted_path() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::WorkspaceWrite,
+
     };
 
     let output = sandbox
@@ -697,7 +699,7 @@ fn full_access_does_not_intercept_writes() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-        sandbox_policy: FsPolicy::FullAccess,
+
     };
 
     let output = sandbox

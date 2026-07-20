@@ -4,7 +4,7 @@
 //! 这些测试覆盖公开的 `sandbox_runtime::config` API。
 
 use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::FsPolicy;
+use sandbox_runtime::{LandlockPerm, LandlockRule};
 
 // ---------------------------------------------------------------------------
 // TOML → SandboxConfig 反序列化（三种策略变体）
@@ -14,11 +14,10 @@ use sandbox_runtime::FsPolicy;
 fn test_toml_full_access() {
     let toml_str = r#"
 [filesystem]
-policy = "full-access"
+landlock = []
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.filesystem.policy, FsPolicy::FullAccess);
-    assert!(config.filesystem.allow_write.is_empty());
+    assert!(config.filesystem.landlock.is_empty());
     // 未指定 section 的默认值
     assert!(!config.network.enabled);
     assert_eq!(config.timeout.default_secs, 30);
@@ -29,25 +28,24 @@ policy = "full-access"
 fn test_toml_read_only() {
     let toml_str = r#"
 [filesystem]
-policy = "read-only"
+landlock = [{ path = "/", perms = ["ro"] }]
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.filesystem.policy, FsPolicy::ReadOnly);
-    assert!(config.filesystem.allow_write.is_empty());
+    assert_eq!(config.filesystem.landlock.len(), 1);
+    assert_eq!(config.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
 }
 
 #[test]
 fn test_toml_workspace_write() {
     let toml_str = r#"
 [filesystem]
-policy = "workspace"
-allow_write = ["/data", "/var/log"]
+landlock = [{ path = "/", perms = ["ro", "rw"] }]
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.filesystem.policy, FsPolicy::WorkspaceWrite);
+    assert_eq!(config.filesystem.landlock.len(), 1);
     assert_eq!(
-        config.filesystem.allow_write,
-        vec!["/data", "/var/log"]
+        config.filesystem.landlock[0].perms,
+        vec![LandlockPerm::Ro, LandlockPerm::Rw]
     );
 }
 
@@ -58,16 +56,17 @@ allow_write = ["/data", "/var/log"]
 #[test]
 fn test_builder_matches_toml() {
     let builder_config = SandboxConfig::builder()
-        .policy(FsPolicy::ReadOnly)
-        .allow_write(vec!["/tmp".to_string()])
+        .landlock(vec![LandlockRule {
+            path: "/".into(),
+            perms: vec![LandlockPerm::Ro],
+        }])
         .network_enabled(true)
         .timeout(60, 600)
         .build();
 
     let toml_str = r#"
 [filesystem]
-policy = "read-only"
-allow_write = ["/tmp"]
+landlock = [{ path = "/", perms = ["ro"] }]
 
 [network]
 enabled = true
@@ -79,12 +78,16 @@ max_secs = 600
     let toml_config: SandboxConfig = toml::from_str(toml_str).unwrap();
 
     assert_eq!(
-        builder_config.filesystem.policy,
-        toml_config.filesystem.policy
+        builder_config.filesystem.landlock.len(),
+        1
     );
     assert_eq!(
-        builder_config.filesystem.allow_write,
-        toml_config.filesystem.allow_write
+        toml_config.filesystem.landlock.len(),
+        1
+    );
+    assert_eq!(
+        builder_config.filesystem.landlock[0].perms,
+        toml_config.filesystem.landlock[0].perms
     );
     assert_eq!(builder_config.network.enabled, toml_config.network.enabled);
     assert_eq!(
@@ -132,17 +135,17 @@ fn test_expand_tilde() {
 }
 
 // ---------------------------------------------------------------------------
-// 无效的策略值会被 serde 拒绝
+// 无效的 landlock 权限值会被 serde 拒绝
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_invalid_policy_rejected() {
     let toml_str = r#"
 [filesystem]
-policy = "invalid-policy"
+landlock = [{ path = "/", perms = ["invalid-perm"] }]
 "#;
     let result: Result<SandboxConfig, _> = toml::from_str(toml_str);
-    assert!(result.is_err(), "invalid policy should fail to deserialise");
+    assert!(result.is_err(), "invalid landlock perm should fail to deserialise");
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("unknown variant") || err.contains("unknown"),
@@ -158,10 +161,10 @@ policy = "invalid-policy"
 fn test_partial_toml_uses_defaults() {
     let toml_str = r#"
 [filesystem]
-policy = "full-access"
+landlock = []
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.filesystem.policy, FsPolicy::FullAccess);
+    assert!(config.filesystem.landlock.is_empty());
     // 未指定 section 的默认值
     assert!(!config.network.enabled);
     assert_eq!(config.timeout.default_secs, 30);
@@ -175,8 +178,10 @@ policy = "full-access"
 #[test]
 fn test_toml_round_trip() {
     let original = SandboxConfig::builder()
-        .policy(FsPolicy::WorkspaceWrite)
-        .allow_write(vec!["/data".to_string()])
+        .landlock(vec![LandlockRule {
+            path: "/data".into(),
+            perms: vec![LandlockPerm::Rw],
+        }])
         .network_enabled(false)
         .timeout(60, 600)
         .build();
@@ -185,12 +190,12 @@ fn test_toml_round_trip() {
     let deserialized: SandboxConfig = toml::from_str(&toml_str).unwrap();
 
     assert_eq!(
-        original.filesystem.policy,
-        deserialized.filesystem.policy
+        original.filesystem.landlock.len(),
+        deserialized.filesystem.landlock.len()
     );
     assert_eq!(
-        original.filesystem.allow_write,
-        deserialized.filesystem.allow_write
+        original.filesystem.landlock[0].perms,
+        deserialized.filesystem.landlock[0].perms
     );
     assert_eq!(original.network.enabled, deserialized.network.enabled);
     assert_eq!(

@@ -2,7 +2,7 @@
 //!
 //! 本模块定义平台无关的抽象：
 //! - [`Sandbox`] trait（沙箱后端的主要抽象）
-//! - [`FsPolicy`]、[`DenyMechanism`]、[`ExitReason`]
+//! - [`LandlockPerm`]、[`LandlockRule`]、[`DenyMechanism`]、[`ExitReason`]
 //! - 命令规格：[`CommandSpec`]、[`CommandOutput`]
 
 use std::collections::HashMap;
@@ -17,36 +17,45 @@ pub mod config;
 pub mod linux;
 
 // ---------------------------------------------------------------------------
-// FsPolicy（核心类型，也被 config 使用）
+// LandlockPerm + LandlockRule
 // ---------------------------------------------------------------------------
 
-/// 沙箱的文件系统访问策略。
-///
-/// 这是一个核心类型，同时被 [`crate::config::FilesystemConfig`] 使用，
-/// 可通过 TOML 或 JSON 序列化/反序列化。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "policy", rename_all = "kebab-case")]
-pub enum FsPolicy {
-    /// 允许完全访问文件系统（不设置 Landlock 规则）。
-    FullAccess,
-    /// 允许只读访问；写操作会被阻止。
-    ReadOnly,
-    /// 仅允许对工作区目录、`/tmp` 以及显式列出的路径执行写操作
-    ///（见 [`crate::config::FilesystemConfig`] 中的 `allow_write`）。
-    #[serde(rename = "workspace")]
-    WorkspaceWrite,
+/// Landlock 路径权限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LandlockPerm {
+    Ro,
+    Rw,
+    Exec,
+    Refer,
+    Truncate,
+    IoctlDev,
+    TcpBind,
+    TcpConnect,
 }
 
-impl std::str::FromStr for FsPolicy {
+impl std::str::FromStr for LandlockPerm {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "full-access" => Ok(FsPolicy::FullAccess),
-            "read-only" => Ok(FsPolicy::ReadOnly),
-            "workspace" => Ok(FsPolicy::WorkspaceWrite),
-            _ => anyhow::bail!("unknown policy '{s}'; expected one of: full-access, read-only, workspace"),
+            "ro" => Ok(LandlockPerm::Ro),
+            "rw" => Ok(LandlockPerm::Rw),
+            "exec" => Ok(LandlockPerm::Exec),
+            "refer" => Ok(LandlockPerm::Refer),
+            "truncate" => Ok(LandlockPerm::Truncate),
+            "ioctl-dev" => Ok(LandlockPerm::IoctlDev),
+            "tcp-bind" => Ok(LandlockPerm::TcpBind),
+            "tcp-connect" => Ok(LandlockPerm::TcpConnect),
+            _ => anyhow::bail!("unknown landlock perm '{s}'"),
         }
     }
+}
+
+/// 一条 Landlock 规则：路径 + 权限列表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LandlockRule {
+    pub path: PathBuf,
+    pub perms: Vec<LandlockPerm>,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,8 +126,6 @@ pub struct CommandSpec {
     pub env: HashMap<String, String>,
     /// 命令在被杀死前的最大运行时间（wall-clock）。
     pub timeout: Duration,
-    /// 该命令的文件系统策略。
-    pub sandbox_policy: FsPolicy,
 }
 
 // ---------------------------------------------------------------------------

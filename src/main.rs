@@ -4,7 +4,7 @@ use std::time::Duration;
 use clap::Parser;
 
 use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
+use sandbox_runtime::{CommandSpec, ExitReason, LandlockPerm, LandlockRule, Sandbox};
 
 #[cfg(target_os = "linux")]
 use sandbox_runtime::linux::{self, LinuxSandbox};
@@ -18,17 +18,13 @@ use sandbox_runtime::linux::{self, LinuxSandbox};
 enum Cli {
     /// 在沙箱内运行一条命令
     Run {
-        /// 沙箱策略：full-access、read-only、workspace
-        #[arg(short = 'p', long)]
-        policy: Option<String>,
+        /// Landlock 路径权限规格，格式 path:perm1[,perm2...]
+        #[arg(long)]
+        landlock: Vec<String>,
 
         /// 允许网络访问
         #[arg(short = 'n', long)]
         allow_network: bool,
-
-        /// 额外的可写路径（可重复指定）
-        #[arg(short = 'w', long)]
-        allow_write: Vec<String>,
 
         /// 启用调试输出
         #[arg(short = 'd', long)]
@@ -59,12 +55,11 @@ fn main() -> anyhow::Result<()> {
 
     match cli {
         Cli::Run {
-            policy,
+            landlock,
             allow_network,
-            allow_write,
             debug,
             command,
-        } => cmd_run(policy, allow_network, allow_write, debug, command),
+        } => cmd_run(landlock, allow_network, debug, command),
         Cli::Check => cmd_check(),
         Cli::Serve { port } => cmd_serve(port),
     }
@@ -76,9 +71,8 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn cmd_run(
-    policy: Option<String>,
+    landlock: Vec<String>,
     allow_network: bool,
-    allow_write: Vec<String>,
     _debug: bool,
     command: Vec<String>,
 ) -> anyhow::Result<()> {
@@ -90,7 +84,7 @@ fn cmd_run(
         );
     }
 
-    let config = build_config(policy, allow_network, allow_write)?;
+    let config = build_config(landlock, allow_network)?;
 
     let sandbox = LinuxSandbox { config };
 
@@ -104,7 +98,6 @@ fn cmd_run(
         cwd: std::env::current_dir()?,
         env,
         timeout: Duration::from_secs(sandbox.config.timeout.default_secs),
-        sandbox_policy: sandbox.config.filesystem.policy.clone(),
     };
 
     let output = sandbox.execute(&spec)?;
@@ -119,8 +112,7 @@ fn cmd_run(
         }
         ExitReason::Program(code) => {
             if code != 0 {
-                eprintln!("[sandbox-runtime] command failed (exit code {code}) under policy \"{:?}\"",
-                    sandbox.config.filesystem.policy);
+                eprintln!("[sandbox-runtime] command failed (exit code {code})");
             }
             std::process::exit(code)
         }
@@ -133,9 +125,8 @@ fn cmd_run(
 
 #[cfg(not(target_os = "linux"))]
 fn cmd_run(
-    _policy: Option<String>,
+    _landlock: Vec<String>,
     _allow_network: bool,
-    _allow_write: Vec<String>,
     _debug: bool,
     _command: Vec<String>,
 ) -> anyhow::Result<()> {
@@ -200,14 +191,25 @@ fn cmd_serve(port: u16) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// 从 CLI flags 构建一个 [`SandboxConfig`]。
-fn build_config(
-    policy: Option<String>,
-    allow_network: bool,
-    allow_write: Vec<String>,
-) -> anyhow::Result<SandboxConfig> {
-    let mut config = SandboxConfig::builder();
-    if let Some(p) = policy {
-        config = config.policy(p.parse()?);
-    }
-    Ok(config.allow_write(allow_write).network_enabled(allow_network).build())
+fn build_config(landlock: Vec<String>, allow_network: bool) -> anyhow::Result<SandboxConfig> {
+    let rules = landlock
+        .iter()
+        .map(|s| parse_landlock_spec(s))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(SandboxConfig::builder().landlock(rules).network_enabled(allow_network).build())
+}
+
+/// 解析 --landlock 参数：path:perm1[,perm2...]
+fn parse_landlock_spec(s: &str) -> anyhow::Result<LandlockRule> {
+    let (path, perms_str) = s.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("invalid --landlock spec '{s}'; expected format: path:perm1[,perm2...]")
+    })?;
+    let perms = perms_str
+        .split(',')
+        .map(|p| p.parse::<LandlockPerm>())
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(LandlockRule {
+        path: path.into(),
+        perms,
+    })
 }

@@ -152,8 +152,6 @@ fn verify_seccomp_active() -> bool {
 
     let out = run_cli(&[
         "run",
-        "--policy",
-        "full-access",
         "--",
         syscall_probe_bin(),
         // mount syscall 号：x86_64=165, aarch64=40
@@ -315,7 +313,7 @@ fn bpf_nr() -> &'static str {
 /// 调用 sandbox-runtime 包装 syscall_probe 来触发指定 syscall，断言
 /// wrapper 把它归类为 `Denied { Seccomp }` 并退出 126。
 fn assert_syscall_blocked(nr: &str, extra_args: &[&str]) {
-    let mut args: Vec<&str> = vec!["run", "--policy", "full-access", "--", syscall_probe_bin(), nr];
+    let mut args: Vec<&str> = vec!["run", "--", syscall_probe_bin(), nr];
     args.extend_from_slice(extra_args);
 
     let out = run_cli(&args);
@@ -492,8 +490,6 @@ fn full_access_policy_does_not_bypass_seccomp() {
 
     let out = run_cli(&[
         "run",
-        "--policy",
-        "full-access",
         "--",
         syscall_probe_bin(),
         mount_nr(),
@@ -548,8 +544,6 @@ fn normal_exit_does_not_hang_worker() {
     let start = std::time::Instant::now();
     let out = run_cli(&[
         "run",
-        "--policy",
-        "full-access",
         "--",
         true_path,
     ]);

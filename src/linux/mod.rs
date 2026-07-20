@@ -95,7 +95,7 @@ impl Sandbox for LinuxSandbox {
         let program_for_error = spec.program.clone();
 
         // ── 步骤 1：构建 Landlock 规则集并取出其 fd ────────────────────
-        let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd(spec)?;
+        let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd()?;
         let raw_ruleset_fd: i32 = ruleset_fd
             .as_ref()
             .map(|fd| fd.as_raw_fd())
@@ -396,24 +396,9 @@ impl Sandbox for LinuxSandbox {
 impl LinuxSandbox {
     /// 构建 Landlock 规则集并返回其可选的文件描述符。
     ///
-    /// * `FsPolicy::FullAccess` → 返回 `None`（不施加 Landlock 限制）。
-    /// * 其他策略 → 通过 `landlock::build_ruleset` 构建规则集，
-    ///   然后从 `RulesetCreated` 取出底层的 `OwnedFd`。
-    ///
-    /// 调用方（即上面的 `execute`）将原始 fd 传入 `pre_exec` 闭包，
-    /// 由子进程调用 `landlock_restrict_self(2)`。
-    fn prepare_ruleset_fd(&self, spec: &CommandSpec) -> anyhow::Result<Option<OwnedFd>> {
-        // 在 allow_write 路径中展开 ~。
-        let allow_write: Vec<PathBuf> = self
-            .config
-            .filesystem
-            .allow_write
-            .iter()
-            .map(|p| PathBuf::from(crate::config::expand_tilde(p)))
-            .collect();
-
-        // 构建规则集（FullAccess 时可能返回 None）。
-        let created = landlock::build_ruleset(&spec.sandbox_policy, &allow_write, &spec.cwd)?;
+    /// 空规则 → 返回 `None`（不施加 Landlock 限制）。
+    fn prepare_ruleset_fd(&self) -> anyhow::Result<Option<OwnedFd>> {
+        let created = landlock::build_ruleset(&self.config.filesystem.landlock, &std::env::current_dir()?)?;
 
         // 取出可选的 fd —— 这会消费 RulesetCreated。
         // `From<RulesetCreated> for Option<OwnedFd>` 在 landlock crate

@@ -22,7 +22,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::FsPolicy;
+use crate::{LandlockPerm, LandlockRule};
 
 // ---------------------------------------------------------------------------
 // SandboxConfig
@@ -66,19 +66,17 @@ impl SandboxConfig {
 ///
 /// ```ignore
 /// use sandbox_runtime::config::SandboxConfig;
-/// use sandbox_runtime::FsPolicy;
+/// use sandbox_runtime::LandlockRule;
 ///
 /// let config = SandboxConfig::builder()
-///     .policy(FsPolicy::ReadOnly)
-///     .allow_write(vec!["/tmp".to_string()])
+///     .landlock(vec![LandlockRule { path: "/tmp".into(), perms: vec![] }])
 ///     .network_enabled(false)
 ///     .timeout(60, 600)
 ///     .build();
 /// ```
 #[derive(Debug)]
 pub struct SandboxConfigBuilder {
-    policy: Option<FsPolicy>,
-    allow_write: Vec<String>,
+    landlock: Vec<LandlockRule>,
     network_enabled: bool,
     timeout_default_secs: u64,
     timeout_max_secs: u64,
@@ -87,8 +85,7 @@ pub struct SandboxConfigBuilder {
 impl Default for SandboxConfigBuilder {
     fn default() -> Self {
         Self {
-            policy: None,
-            allow_write: Vec::new(),
+            landlock: Vec::new(),
             network_enabled: false,
             timeout_default_secs: 30,
             timeout_max_secs: 300,
@@ -97,15 +94,9 @@ impl Default for SandboxConfigBuilder {
 }
 
 impl SandboxConfigBuilder {
-    /// 设置文件系统策略。
-    pub fn policy(mut self, policy: FsPolicy) -> Self {
-        self.policy = Some(policy);
-        self
-    }
-
-    /// 设置额外的可写路径（追加在工作区目录与 `/tmp` 之外）。
-    pub fn allow_write(mut self, paths: impl Into<Vec<String>>) -> Self {
-        self.allow_write = paths.into();
+    /// 设置 Landlock 规则。
+    pub fn landlock(mut self, rules: Vec<LandlockRule>) -> Self {
+        self.landlock = rules;
         self
     }
 
@@ -129,8 +120,7 @@ impl SandboxConfigBuilder {
     pub fn build(self) -> SandboxConfig {
         SandboxConfig {
             filesystem: FilesystemConfig {
-                policy: self.policy.unwrap_or(FsPolicy::WorkspaceWrite),
-                allow_write: self.allow_write,
+                landlock: self.landlock,
             },
             network: NetworkConfig {
                 enabled: self.network_enabled,
@@ -149,37 +139,26 @@ impl SandboxConfigBuilder {
 
 /// 沙箱的文件系统访问配置。
 ///
-/// `policy` 字段控制粗粒度的访问模式；`allow_write` 列出
-///（除工作区目录与 `/tmp` 之外）沙箱化进程允许写入的路径。
+/// `landlock` 字段指定 Landlock 路径权限规则。
+/// 空列表表示不激活 Landlock。
 ///
 /// # TOML
 ///
 /// ```toml
 /// [filesystem]
-/// policy = "workspace"       # "full-access" | "read-only" | "workspace"
-/// allow_write = ["output", "/var/log/app"]
+/// landlock = [{ path = "/", perms = ["ro"] }]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemConfig {
-    /// 访问策略预设。
-    ///
-    /// `#[serde(flatten)]` 将 `FsPolicy` 的 tag 内联展开，使得 TOML 直接写成
-    /// `policy = "read-only"`，而不是嵌套在 `[filesystem.policy]` 中。
-    #[serde(flatten)]
-    pub policy: FsPolicy,
-
-    /// 额外的可写路径（除工作区目录与 `/tmp` 之外）。
-    ///
-    /// 路径以字符串形式存储，运行时支持 `~` 展开。
+    /// Landlock 路径权限规则。
     #[serde(default)]
-    pub allow_write: Vec<String>,
+    pub landlock: Vec<LandlockRule>,
 }
 
 impl Default for FilesystemConfig {
     fn default() -> Self {
         Self {
-            policy: FsPolicy::WorkspaceWrite,
-            allow_write: Vec::new(),
+            landlock: Vec::new(),
         }
     }
 }
@@ -266,13 +245,12 @@ pub fn expand_tilde(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FsPolicy;
+    use std::path::PathBuf;
 
     #[test]
     fn test_default_config() {
         let config = SandboxConfig::default();
-        assert_eq!(config.filesystem.policy, FsPolicy::WorkspaceWrite);
-        assert!(config.filesystem.allow_write.is_empty());
+        assert!(config.filesystem.landlock.is_empty());
         assert!(!config.network.enabled);
         assert_eq!(config.timeout.default_secs, 30);
         assert_eq!(config.timeout.max_secs, 300);
@@ -297,7 +275,7 @@ mod tests {
     #[test]
     fn test_builder_default() {
         let config = SandboxConfig::builder().build();
-        assert_eq!(config.filesystem.policy, FsPolicy::WorkspaceWrite);
+        assert!(config.filesystem.landlock.is_empty());
         assert!(!config.network.enabled);
         assert_eq!(config.timeout.default_secs, 30);
         assert_eq!(config.timeout.max_secs, 300);
@@ -306,14 +284,20 @@ mod tests {
     #[test]
     fn test_builder_roundtrip() {
         let config = SandboxConfig::builder()
-            .policy(FsPolicy::ReadOnly)
-            .allow_write(vec!["/tmp".to_string(), "./output".to_string()])
+            .landlock(vec![
+                LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
+                LandlockRule { path: "/tmp".into(), perms: vec![LandlockPerm::Rw] },
+                LandlockRule { path: "./output".into(), perms: vec![LandlockPerm::Rw] },
+            ])
             .network_enabled(true)
             .timeout(60, 600)
             .build();
 
-        assert_eq!(config.filesystem.policy, FsPolicy::ReadOnly);
-        assert_eq!(config.filesystem.allow_write, vec!["/tmp", "./output"]);
+        assert_eq!(config.filesystem.landlock.len(), 3);
+        assert_eq!(config.filesystem.landlock[0].path, PathBuf::from("/"));
+        assert_eq!(config.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
+        assert_eq!(config.filesystem.landlock[1].perms, vec![LandlockPerm::Rw]);
+        assert_eq!(config.filesystem.landlock[2].perms, vec![LandlockPerm::Rw]);
         assert!(config.network.enabled);
         assert_eq!(config.timeout.default_secs, 60);
         assert_eq!(config.timeout.max_secs, 600);
@@ -322,8 +306,7 @@ mod tests {
     #[test]
     fn test_filesystem_default() {
         let fs = FilesystemConfig::default();
-        assert_eq!(fs.policy, FsPolicy::WorkspaceWrite);
-        assert!(fs.allow_write.is_empty());
+        assert!(fs.landlock.is_empty());
     }
 
     #[test]
@@ -347,11 +330,12 @@ mod tests {
 
     #[test]
     fn test_toml_roundtrip() {
-        // 将 config 序列化为 TOML，再反序列化回来。
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
-                policy: FsPolicy::WorkspaceWrite,
-                allow_write: vec!["/data".to_string()],
+                landlock: vec![
+                    LandlockRule { path: "/".into(), perms: vec![LandlockPerm::Ro] },
+                    LandlockRule { path: "/data".into(), perms: vec![LandlockPerm::Rw] },
+                ],
             },
             network: NetworkConfig { enabled: false },
             timeout: TimeoutConfig {
@@ -364,21 +348,19 @@ mod tests {
         let deserialised: SandboxConfig =
             toml::from_str(&toml_str).expect("deserialisation should succeed");
 
-        assert_eq!(deserialised.filesystem.policy, FsPolicy::WorkspaceWrite);
-        assert_eq!(deserialised.filesystem.allow_write, vec!["/data"]);
+        assert_eq!(deserialised.filesystem.landlock.len(), 2);
+        assert_eq!(deserialised.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
+        assert_eq!(deserialised.filesystem.landlock[1].perms, vec![LandlockPerm::Rw]);
         assert!(!deserialised.network.enabled);
         assert_eq!(deserialised.timeout.default_secs, 60);
         assert_eq!(deserialised.timeout.max_secs, 600);
     }
 
     #[test]
-    fn test_toml_deserialize_flattened_policy() {
-        // 验证被 flatten 的 `policy` tag：应在 `[filesystem]` 顶层写
-        // `policy = "read-only"`，而不是嵌套的 `[filesystem.policy]`。
+    fn test_toml_deserialize_landlock() {
         let toml_str = r#"
 [filesystem]
-policy = "read-only"
-allow_write = ["/tmp"]
+landlock = [{ path = "/", perms = ["ro"] }, { path = "/tmp", perms = ["rw"] }]
 
 [network]
 enabled = true
@@ -388,42 +370,49 @@ default_secs = 10
 max_secs = 120
 "#;
         let config: SandboxConfig = toml::from_str(toml_str).expect("TOML should parse");
-        assert_eq!(config.filesystem.policy, FsPolicy::ReadOnly);
-        assert_eq!(config.filesystem.allow_write, vec!["/tmp"]);
+        assert_eq!(config.filesystem.landlock.len(), 2);
+        assert_eq!(config.filesystem.landlock[0].perms, vec![LandlockPerm::Ro]);
+        assert_eq!(config.filesystem.landlock[1].perms, vec![LandlockPerm::Rw]);
         assert!(config.network.enabled);
         assert_eq!(config.timeout.default_secs, 10);
         assert_eq!(config.timeout.max_secs, 120);
     }
 
     #[test]
-    fn test_toml_full_access() {
+    fn test_toml_empty_landlock() {
         let toml_str = r#"
 [filesystem]
-policy = "full-access"
+landlock = []
 "#;
         let config: SandboxConfig = toml::from_str(toml_str).expect("TOML should parse");
-        assert_eq!(config.filesystem.policy, FsPolicy::FullAccess);
+        assert!(config.filesystem.landlock.is_empty());
     }
 
     #[test]
-    fn test_toml_invalid_policy() {
+    fn test_toml_invalid_landlock_perm() {
         let toml_str = r#"
 [filesystem]
-policy = "invalid-policy"
+landlock = [{ path = "/", perms = ["invalid-perm"] }]
 "#;
         let result: Result<SandboxConfig, _> = toml::from_str(toml_str);
-        assert!(result.is_err(), "invalid policy should fail to deserialise");
+        assert!(result.is_err(), "invalid landlock perm should fail to deserialise");
     }
 
     #[test]
     fn test_tilde_in_builder_paths() {
         // Builder 原样存储路径；展开是运行时的职责。
         let config = SandboxConfig::builder()
-            .allow_write(vec!["~/workspace".to_string()])
+            .landlock(vec![LandlockRule {
+                path: "~/workspace".into(),
+                perms: vec![LandlockPerm::Rw],
+            }])
             .build();
-        assert_eq!(config.filesystem.allow_write, vec!["~/workspace"]);
+        assert_eq!(
+            config.filesystem.landlock[0].path,
+            PathBuf::from("~/workspace")
+        );
         // 运行时调用 expand_tilde
-        let expanded = expand_tilde(&config.filesystem.allow_write[0]);
+        let expanded = expand_tilde(config.filesystem.landlock[0].path.to_str().unwrap());
         assert!(!expanded.starts_with("~/"));
         assert!(expanded.ends_with("/workspace"));
     }
