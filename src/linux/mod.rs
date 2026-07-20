@@ -31,6 +31,7 @@
 //!    在 exit_code=0 的情况下仍然把命令归类为 `Denied { Seccomp }`。
 
 pub mod landlock;
+pub mod namespaces;
 pub mod seccomp;
 
 use std::mem::{self, MaybeUninit};
@@ -64,7 +65,6 @@ const SCM_RIGHTS: libc::c_int = libc::SCM_RIGHTS;
 /// 子进程 sendmsg 时附带 listener fd，载荷是单字节 `0x42`。
 const CTRL_PAYLOAD: [u8; 1] = [0x42];
 
-
 // ---------------------------------------------------------------------------
 // LinuxSandbox
 // ---------------------------------------------------------------------------
@@ -96,10 +96,7 @@ impl Sandbox for LinuxSandbox {
 
         // ── 步骤 1：构建 Landlock 规则集并取出其 fd ────────────────────
         let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd()?;
-        let raw_ruleset_fd: i32 = ruleset_fd
-            .as_ref()
-            .map(|fd| fd.as_raw_fd())
-            .unwrap_or(-1);
+        let raw_ruleset_fd: i32 = ruleset_fd.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1);
 
         // ── 步骤 2：构建 seccomp BPF filter ───────────────────────────
         let bpf_filter = self.build_bpf_filter();
@@ -125,6 +122,42 @@ impl Sandbox for LinuxSandbox {
         // 不能持有 OwnedFd——闭包在 fork 后 drop 会双关同一 fd）。
         let child_fd_raw = child_sock.as_raw_fd();
 
+        // ── 计算 namespace 参数 ────────────────────────────────
+        let ns = &self.config.namespaces;
+        let ns_ops: Vec<(i32, bool)> = {
+            let mut v = Vec::new();
+            if ns.user {
+                v.push((libc::CLONE_NEWUSER, ns.user_try));
+            }
+            if ns.ipc {
+                v.push((libc::CLONE_NEWIPC, false));
+            }
+            if ns.pid {
+                v.push((libc::CLONE_NEWPID, false));
+            }
+            if ns.net {
+                v.push((libc::CLONE_NEWNET, false));
+            }
+            if ns.uts {
+                v.push((libc::CLONE_NEWUTS, false));
+            }
+            if ns.cgroup {
+                v.push((libc::CLONE_NEWCGROUP, ns.cgroup_try));
+            }
+            v
+        };
+
+        // ── 预计算 uid_map/gid_map 内容（如果 user ns）─────────────
+        let real_uid: u32 = unsafe { libc::getuid() };
+        let real_gid: u32 = unsafe { libc::getgid() };
+        let sandbox_uid = ns.uid.unwrap_or(real_uid);
+        let sandbox_gid = ns.gid.unwrap_or(real_gid);
+        let uid_map_content: Vec<u8> = format!("{sandbox_uid} {real_uid} 1\n").into_bytes();
+        let gid_map_content: Vec<u8> = format!("{sandbox_gid} {real_gid} 1\n").into_bytes();
+
+        // ── 预计算 hostname bytes ────────────────────────────
+        let hostname_bytes: Option<Vec<u8>> = ns.hostname.as_ref().map(|h| h.as_bytes().to_vec());
+
         // ── 步骤 5：以 pre_exec 施加限制并 spawn 子进程 ───────────────
         //
         // 关于 `pre_exec` 的 SAFETY：
@@ -143,40 +176,53 @@ impl Sandbox for LinuxSandbox {
             std::process::Command::new(&spec.program)
                 .args(&spec.args)
                 .current_dir(&cwd)
+                .env_clear() // 清空继承的环境变量，只保留 spec.env
                 .envs(&spec.env)
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .pre_exec(move || {
-                    // -------------------------------------------------------
-                    // 步骤 A：prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
-                    //
-                    // 对于没有 CAP_SYS_ADMIN 的进程，在使用
-                    // SECCOMP_MODE_FILTER 之前必须设置。
-                    // man:prctl(2) PR_SET_NO_NEW_PRIVS
-                    // -------------------------------------------------------
-                    // SAFETY：参数都是普通整数；内核会校验并
-                    // 在失败时返回错误码。
+                    // ── 第 1 步：逐个创建 namespace ───────────────────
+                    let mut user_ns_active = false;
+                    for &(flag, try_mode) in &ns_ops {
+                        let ret = libc::syscall(libc::SYS_unshare, flag as libc::c_long);
+                        if ret != 0 {
+                            if try_mode {
+                                continue;
+                            }
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if (flag & libc::CLONE_NEWUSER) != 0 {
+                            user_ns_active = true;
+                        }
+                    }
+
+                    // ── 第 2 步：prctl(NO_NEW_PRIVS) ───────────────────
+                    // seccomp 和 Landlock（非 root 下）均需要 no_new_privs。
+                    // 放在 uid_map 之后没有问题——写 uid_map 不需要该标志。
                     let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
                     if ret != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
 
-                    // -------------------------------------------------------
-                    // 步骤 B：landlock_restrict_self(ruleset_fd, 0)
-                    //
-                    // 将 Landlock 规则集施加到当前进程。仅在已构建
-                    // 规则集（非 FullAccess）时调用。
-                    // man:landlock_restrict_self(2)
-                    // -------------------------------------------------------
+                    // ── 第 3 步：如果 user ns 创建成功，写 uid/gid map ───
+                    if user_ns_active {
+                        namespaces::write_ns_file(b"/proc/self/uid_map\0", &uid_map_content)?;
+                        let _ = namespaces::write_ns_file(b"/proc/self/setgroups\0", b"deny\n");
+                        namespaces::write_ns_file(b"/proc/self/gid_map\0", &gid_map_content)?;
+                    }
+
+                    // ── 第 4 步：sethostname（如果设置了 hostname）───────
+                    if let Some(ref h) = hostname_bytes {
+                        namespaces::set_hostname(h)?;
+                    }
+
+                    // ── 第 5 步：landlock_restrict_self ─────────────────
                     if raw_ruleset_fd >= 0 {
                         // SAFETY：`raw_ruleset_fd` 是父进程经由
                         // `landlock_create_ruleset(2)` 创建的有效 fd。
                         // 内核会校验访问权限。
-                        let ret = libc::syscall(
-                            libc::SYS_landlock_restrict_self,
-                            raw_ruleset_fd,
-                            0,
-                        );
+                        let ret =
+                            libc::syscall(libc::SYS_landlock_restrict_self, raw_ruleset_fd, 0);
                         if ret != 0 {
                             return Err(std::io::Error::last_os_error());
                         }
@@ -184,44 +230,15 @@ impl Sandbox for LinuxSandbox {
                         libc::close(raw_ruleset_fd);
                     }
 
-                    // -------------------------------------------------------
-                    // 步骤 C：seccomp(SECCOMP_SET_MODE_FILTER,
-                    //                   SECCOMP_FILTER_FLAG_NEW_LISTENER,
-                    //                   &fprog)
-                    //
-                    // 加载 BPF 黑名单 filter。之后的每一次系统调用都会
-                    // 通过这个 filter 校验。
-                    // 命中黑名单时返回 SECCOMP_RET_USER_NOTIF，
-                    // 内核向 listener fd 投递 seccomp_notif，由父进程
-                    // 的 worker 读取后通过 SECCOMP_IOCTL_NOTIF_SEND
-                    // 回复 EPERM。
-                    //
-                    // 错误信息是 async-signal-safe 的固定字符串
-                    //（**不**使用 `format!` 以避免堆分配）。
-                    // man:seccomp(2) SECCOMP_SET_MODE_FILTER
-                    // -------------------------------------------------------
+                    // ── 第 6 步：seccomp BPF filter ───────────────────
                     let listener_fd = match seccomp::install_user_notif_filter(&bpf_filter) {
                         Ok(fd) => fd,
                         Err(_) => {
-                            return Err(std::io::Error::other(
-                                "install_user_notif_filter failed",
-                            ));
+                            return Err(std::io::Error::other("install_user_notif_filter failed"));
                         }
                     };
 
-                    // -------------------------------------------------------
-                    // 步骤 D：sendmsg(SCM_RIGHTS) 把 listener fd 发给父进程
-                    //
-                    // 把 listener fd 通过 unix socket 跨进程边界交给父进程，
-                    // 父进程侧的 worker 线程通过 recvmsg(SCM_RIGHTS) 收。
-                    //
-                    // 我们附一个单字节 payload `0x42` 让父端能确认消息
-                    // 完整收到（无 payload 的 sendmsg 在某些内核上行为
-                    // 略有差异）。
-                    //
-                    // 失败时**先** close 已拿到的 listener fd 再返回
-                    // Err，避免 fd 泄漏到 exec 后的进程。
-                    // -------------------------------------------------------
+                    // ── 第 7 步：sendmsg SCM_RIGHTS ───────────────────
                     if let Err(e) = send_fd(child_fd_raw, listener_fd) {
                         libc::close(listener_fd);
                         libc::close(child_fd_raw);
@@ -274,7 +291,7 @@ impl Sandbox for LinuxSandbox {
         // 把父端 socketpair 的 raw fd 抽出来传给 helper，避免
         // 把 OwnedFd 移进闭包后外面还要 drop（helper 内部只借用 raw fd）。
         let parent_fd_raw = parent_stream.as_raw_fd();
-        let notif_handle = spawn_user_notif_worker(parent_fd_raw, &blocked)?;
+        let _notif_handle = spawn_user_notif_worker(parent_fd_raw, &blocked)?;
 
         // ── 步骤 8：waitid(WEXITED) —— 阻塞到子进程退出 ─────────────
         //
@@ -284,17 +301,13 @@ impl Sandbox for LinuxSandbox {
         //
         // SAFETY：siginfo 由 waitid 写入。
         let mut siginfo: libc::siginfo_t = unsafe { mem::zeroed() };
-        let r = unsafe {
-            libc::waitid(libc::P_PID, pid, &mut siginfo, libc::WEXITED)
-        };
+        let r = unsafe { libc::waitid(libc::P_PID, pid, &mut siginfo, libc::WEXITED) };
         if r != 0 {
             let e = std::io::Error::last_os_error();
             // waitid 失败，关闭父端 socketpair 让 worker recv_fd 退出。
             drop(parent_stream);
             return Err(e).with_context(|| {
-                format!(
-                    "waitid(WEXITED) failed for sandboxed process '{program_for_error}'"
-                )
+                format!("waitid(WEXITED) failed for sandboxed process '{program_for_error}'")
             });
         }
 
@@ -334,11 +347,7 @@ impl Sandbox for LinuxSandbox {
     /// 3. **退出码 0** → 正常退出。
     /// 4. **退出码 31 或 159** → SIGSYS（传统 BPF KILL 路径）。
     /// 5. **其他情况** → 普通程序退出。
-    fn classify_exit(
-        &self,
-        exit_code: i32,
-        blocked: Option<(u32, u32)>,
-    ) -> ExitReason {
+    fn classify_exit(&self, exit_code: i32, blocked: Option<(u32, u32)>) -> ExitReason {
         use crate::DenyMechanism;
         use crate::ExitReason::*;
 
@@ -398,7 +407,8 @@ impl LinuxSandbox {
     ///
     /// 空规则 → 返回 `None`（不施加 Landlock 限制）。
     fn prepare_ruleset_fd(&self) -> anyhow::Result<Option<OwnedFd>> {
-        let created = landlock::build_ruleset(&self.config.filesystem.landlock, &std::env::current_dir()?)?;
+        let created =
+            landlock::build_ruleset(&self.config.filesystem.landlock, &std::env::current_dir()?)?;
 
         // 取出可选的 fd —— 这会消费 RulesetCreated。
         // `From<RulesetCreated> for Option<OwnedFd>` 在 landlock crate
@@ -580,11 +590,13 @@ fn recv_fd(socket_fd: RawFd) -> std::io::Result<RawFd> {
 /// 调用 [`UserNotifHandle::shutdown`] 可提前唤醒 worker 阻塞的 `poll`，
 /// [`UserNotifHandle::join`] 等待 worker 线程退出并清理资源。
 /// 若未手动 join，worker 线程在句柄 drop 时 detach。
+#[allow(dead_code)]
 struct UserNotifHandle {
     /// worker 线程句柄。`join()` 取走后置 None 防止重复 join。
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+#[allow(dead_code)]
 impl UserNotifHandle {
     /// 等待 worker 线程退出。
     ///

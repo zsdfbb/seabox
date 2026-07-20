@@ -60,10 +60,7 @@ landlock = [{ path = "/", perms = ["execute", "read-file", "read-dir", "write-fi
 "#;
     let config: SandboxConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.filesystem.landlock.len(), 1);
-    assert_eq!(
-        config.filesystem.landlock[0].perms,
-        perms
-    );
+    assert_eq!(config.filesystem.landlock[0].perms, perms);
 }
 
 // ---------------------------------------------------------------------------
@@ -99,14 +96,8 @@ max_secs = 600
 "#;
     let toml_config: SandboxConfig = toml::from_str(toml_str).unwrap();
 
-    assert_eq!(
-        builder_config.filesystem.landlock.len(),
-        1
-    );
-    assert_eq!(
-        toml_config.filesystem.landlock.len(),
-        1
-    );
+    assert_eq!(builder_config.filesystem.landlock.len(), 1);
+    assert_eq!(toml_config.filesystem.landlock.len(), 1);
     assert_eq!(
         builder_config.filesystem.landlock[0].perms,
         toml_config.filesystem.landlock[0].perms
@@ -167,7 +158,10 @@ fn test_invalid_policy_rejected() {
 landlock = [{ path = "/", perms = ["invalid-perm"] }]
 "#;
     let result: Result<SandboxConfig, _> = toml::from_str(toml_str);
-    assert!(result.is_err(), "invalid landlock perm should fail to deserialise");
+    assert!(
+        result.is_err(),
+        "invalid landlock perm should fail to deserialise"
+    );
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("unknown variant") || err.contains("unknown"),
@@ -236,8 +230,5 @@ fn test_toml_round_trip() {
         original.timeout.default_secs,
         deserialized.timeout.default_secs
     );
-    assert_eq!(
-        original.timeout.max_secs,
-        deserialized.timeout.max_secs
-    );
+    assert_eq!(original.timeout.max_secs, deserialized.timeout.max_secs);
 }

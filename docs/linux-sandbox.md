@@ -10,9 +10,12 @@
 |---|---|---|---|
 | 文件系统读写 | Landlock ruleset（`landlock_create_ruleset` + `landlock_add_rule` + `landlock_restrict_self`） | 5.13+ | ✅ Phase 1 |
 | 危险 syscall 拦截 | seccomp BPF USER_NOTIF（`SECCOMP_SET_MODE_FILTER` + `SECCOMP_RET_USER_NOTIF`） | 5.0+ | ✅ Phase 1 |
-| 用户/UID 隔离 | `unshare(CLONE_NEWUSER)` | 3.8+ | 🚧 Phase 2 |
-| 网络阻断 | `unshare(CLONE_NEWNET)` + lo down | 2.6.24+ | 🚧 Phase 2 |
-| 进程命名空间 | `unshare(CLONE_NEWPID)`（可选） | 2.6.24+ | 📋 计划 |
+| 用户/UID 隔离 | `unshare(CLONE_NEWUSER)` | 3.8+ | ✅ Phase 2 |
+| 网络阻断 | `unshare(CLONE_NEWNET)` + lo down | 2.6.24+ | ✅ Phase 2 |
+| 进程命名空间 | `unshare(CLONE_NEWPID)` | 2.6.24+ | ✅ Phase 2 |
+| IPC 隔离 | `unshare(CLONE_NEWIPC)` | 2.6.24+ | ✅ Phase 2 |
+| 主机名隔离 | `unshare(CLONE_NEWUTS)` + `sethostname()` | 2.6.24+ | ✅ Phase 2 |
+| Cgroup 隔离 | `unshare(CLONE_NEWCGROUP)` | 4.6+ | ✅ Phase 2 |
 | eBPF 网络过滤 | `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` + aya | 4.10+, cgroup v2 | 📋 Phase 2b |
 
 ## Landlock ABI 版本
@@ -55,12 +58,37 @@
 
 拒绝消息格式：`Blocked by seccomp filter (SIGSYS): syscall='mount' category='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS`
 
-## 执行流程
+## 命名空间支持
 
-父进程构建 Landlock ruleset_fd + seccomp BPF 数组 → `Command::spawn()` + `pre_exec` 闭包（零分配，只做系统调用）：
+| 命名空间 | `clone` / `unshare` 标志 | 内核要求 | CLI 标志 |
+|---|---|---|---|
+| User | `CLONE_NEWUSER` | 3.8+ | `--unshare-user` / `--unshare-user-try` |
+| IPC | `CLONE_NEWIPC` | 2.6.24+ | `--unshare-ipc` |
+| PID | `CLONE_NEWPID` | 2.6.24+ | `--unshare-pid` |
+| Network | `CLONE_NEWNET` | 2.6.24+ | `--unshare-net` |
+| UTS | `CLONE_NEWUTS` | 2.6.24+ | `--unshare-uts` |
+| Cgroup | `CLONE_NEWCGROUP` | 4.6+ | `--unshare-cgroup` / `--unshare-cgroup-try` |
 
-1. `prctl(PR_SET_NO_NEW_PRIVS, 1)` — 设置 no_new_privs
-2. `landlock_restrict_self(ruleset_fd, 0)` — 施加 Landlock ACL（如有规则）
-3. `seccomp(SECCOMP_SET_MODE_FILTER, NEW_LISTENER, &fprog)` — 加载 BPF filter，返回 listener fd
-4. `sendmsg(SCM_RIGHTS)` — 把 listener fd 经 socketpair 传给父进程
-5. `execve(...)` — 执行目标程序
+快捷方式：`--unshare-all` 等价于以上 6 个同时启用（不含 try 变体）。
+
+额外的关联参数：
+
+| 参数 | 依赖 | 说明 |
+|---|---|---|
+| `--uid UID` | `--unshare-user` / `--unshare-all` | user ns 内的 uid 映射（默认：当前 uid） |
+| `--gid GID` | `--unshare-user` / `--unshare-all` | user ns 内的 gid 映射（默认：当前 gid） |
+| `--hostname NAME` | `--unshare-uts` / `--unshare-all` | UTS ns 内的 hostname |
+
+预执行顺序：`unshare` 必须在 `seccomp` 之前（seccomp 黑名单含 `unshare(2)`）。
+User ns 必须在其他命名空间之前（user ns 授予 ns 内的全部 capability，使后续 net/pid/uts 等 ns 创建可以不需要主机 CAP_SYS_ADMIN）。
+
+父进程构建 Landlock ruleset_fd + seccomp BPF 数组 + namespace 配置 → `Command::spawn()` + `pre_exec` 闭包（零分配，只做系统调用）：
+
+1. `unshare(flags)` — 逐个创建命名空间（在 seccomp 之前，因为 seccomp 黑名单会拦截 `unshare`）
+2. `prctl(PR_SET_NO_NEW_PRIVS, 1)` — 设置 no_new_privs（uid_map 和 seccomp 的前置条件）
+3. `write(/proc/self/uid_map + setgroups(deny) + gid_map)` — 映射 user ns UID/GID（如需要）
+4. `sethostname(name)` — 设置 UTS 命名空间主机名（如需要）
+5. `landlock_restrict_self(ruleset_fd, 0)` — 施加 Landlock ACL（如有规则）
+6. `seccomp(SECCOMP_SET_MODE_FILTER, NEW_LISTENER, &fprog)` — 加载 BPF filter，返回 listener fd
+7. `sendmsg(SCM_RIGHTS)` — 把 listener fd 经 socketpair 传给父进程
+8. `execve(...)` — 执行目标程序

@@ -208,8 +208,14 @@ fn workspace_write_allows_write() {
         LandlockPerm::Truncate,
     ];
     let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: ro_perms },
-        LandlockRule { path: dir_path.clone(), perms: rw_perms },
+        LandlockRule {
+            path: "/".into(),
+            perms: ro_perms,
+        },
+        LandlockRule {
+            path: dir_path.clone(),
+            perms: rw_perms,
+        },
     ]);
     let spec = CommandSpec {
         program: "sh".to_string(),
@@ -291,9 +297,10 @@ fn read_only_blocks_write() {
         LandlockPerm::ReadFile,
         LandlockPerm::ReadDir,
     ];
-    let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: ro_perms },
-    ]);
+    let sandbox = make_sandbox_with_landlock(vec![LandlockRule {
+        path: "/".into(),
+        perms: ro_perms,
+    }]);
     let spec = CommandSpec {
         program: "sh".to_string(),
         args: vec!["-c".to_string(), "echo ok > test.txt".to_string()],
@@ -383,15 +390,7 @@ fn cli_workspace_write_blocks_write_outside_cwd() {
     let sh_cmd = format!("echo blocked > {}", target_file.display());
 
     let out = run_cli_in(
-        &[
-            "run",
-            "--policy",
-            "workspace",
-            "--",
-            "sh",
-            "-c",
-            &sh_cmd,
-        ],
+        &["run", "--policy", "workspace", "--", "sh", "-c", &sh_cmd],
         dir.path(),
     );
 
@@ -429,15 +428,7 @@ fn cli_full_access_allows_arbitrary_write() {
     let sh_cmd = format!("echo ok > {}", target_file.display());
 
     let out = run_cli_in(
-        &[
-            "run",
-            "--policy",
-            "full-access",
-            "--",
-            "sh",
-            "-c",
-            &sh_cmd,
-        ],
+        &["run", "--policy", "full-access", "--", "sh", "-c", &sh_cmd],
         dir.path(),
     );
 
@@ -506,9 +497,7 @@ fn make_sandbox_with_landlock(rules: Vec<LandlockRule>) -> LinuxSandbox {
     use sandbox_runtime::config::FilesystemConfig;
     LinuxSandbox {
         config: SandboxConfig {
-            filesystem: FilesystemConfig {
-                landlock: rules,
-            },
+            filesystem: FilesystemConfig { landlock: rules },
             ..Default::default()
         },
     }
@@ -532,7 +521,6 @@ fn read_only_allows_read() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-
     };
 
     let output = sandbox
@@ -566,7 +554,6 @@ fn workspace_write_allows_write_to_tmp() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-
     };
 
     let output = sandbox
@@ -598,7 +585,6 @@ fn workspace_write_allows_read_anywhere() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-
     };
 
     let output = sandbox
@@ -643,8 +629,14 @@ fn workspace_write_grants_allow_write_path() {
         LandlockPerm::Truncate,
     ];
     let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: ro_perms },
-        LandlockRule { path: granted_dir.clone(), perms: rw_perms },
+        LandlockRule {
+            path: "/".into(),
+            perms: ro_perms,
+        },
+        LandlockRule {
+            path: granted_dir.clone(),
+            perms: rw_perms,
+        },
     ]);
 
     let target = granted_dir.join("written_file");
@@ -655,7 +647,6 @@ fn workspace_write_grants_allow_write_path() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-
     };
 
     let output = sandbox
@@ -705,8 +696,14 @@ fn workspace_write_does_not_grant_unlisted_path() {
         LandlockPerm::Truncate,
     ];
     let sandbox = make_sandbox_with_landlock(vec![
-        LandlockRule { path: "/".into(), perms: ro_perms },
-        LandlockRule { path: granted_dir.clone(), perms: rw_perms },
+        LandlockRule {
+            path: "/".into(),
+            perms: ro_perms,
+        },
+        LandlockRule {
+            path: granted_dir.clone(),
+            perms: rw_perms,
+        },
     ]);
 
     let target = other_dir.join("should_be_blocked");
@@ -717,7 +714,6 @@ fn workspace_write_does_not_grant_unlisted_path() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-
     };
 
     let output = sandbox
@@ -755,7 +751,6 @@ fn full_access_does_not_intercept_writes() {
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
         timeout: Duration::from_secs(10),
-
     };
 
     let output = sandbox
@@ -790,10 +785,7 @@ fn cli_read_only_allows_read() {
         out.stdout,
         out.stderr
     );
-    assert!(
-        !out.stdout.is_empty(),
-        "cat /etc/passwd 应有 stdout 输出"
-    );
+    assert!(!out.stdout.is_empty(), "cat /etc/passwd 应有 stdout 输出");
 }
 
 // CLI L6：`--policy workspace` 下写到 /tmp 应成功。
@@ -807,15 +799,7 @@ fn cli_workspace_write_allows_write_to_tmp() {
     let target = unique_path("cli_workspace_tmp");
     let sh_cmd = format!("echo ok > {}", target.display());
 
-    let out = run_cli(&[
-        "run",
-        "--policy",
-        "workspace",
-        "--",
-        "sh",
-        "-c",
-        &sh_cmd,
-    ]);
+    let out = run_cli(&["run", "--policy", "workspace", "--", "sh", "-c", &sh_cmd]);
 
     cleanup_path(&target);
 
@@ -943,15 +927,7 @@ fn cli_full_access_allows_write_to_var_tmp() {
     let target = unique_path_in_var_tmp("cli_full_access");
     let sh_cmd = format!("echo ok > {}", target.display());
 
-    let out = run_cli(&[
-        "run",
-        "--policy",
-        "full-access",
-        "--",
-        "sh",
-        "-c",
-        &sh_cmd,
-    ]);
+    let out = run_cli(&["run", "--policy", "full-access", "--", "sh", "-c", &sh_cmd]);
 
     cleanup_path(&target);
 
@@ -981,60 +957,89 @@ fn zzz_flush_stdout_marker() {
 
 #[test]
 fn cli_landlock_ro_blocks_write() {
-    if skip_unless_landlock_active() { return; }
+    if skip_unless_landlock_active() {
+        return;
+    }
     let out = run_cli(&[
-        "run", "--landlock", "/:ro", "--", "sh", "-c",
+        "run",
+        "--landlock",
+        "/:ro",
+        "--",
+        "sh",
+        "-c",
         "echo hi > /tmp/.sandbox_ll_ro_test",
     ]);
     assert_eq!(
-        out.exit_code, Some(2),
-        "ro 模式下写 /tmp 应被拒绝, stderr={:?}", out.stderr
+        out.exit_code,
+        Some(2),
+        "ro 模式下写 /tmp 应被拒绝, stderr={:?}",
+        out.stderr
     );
 }
 
 #[test]
 fn cli_landlock_rw_allows_write() {
-    if skip_unless_landlock_active() { return; }
+    if skip_unless_landlock_active() {
+        return;
+    }
     let target = format!("/tmp/.sandbox_ll_rw_test");
     let out = run_cli(&[
-        "run", "--landlock", "/:ro", "--landlock", "/tmp:rw", "--", "sh", "-c",
+        "run",
+        "--landlock",
+        "/:ro",
+        "--landlock",
+        "/tmp:rw",
+        "--",
+        "sh",
+        "-c",
         &format!("echo hi > {target}"),
     ]);
     assert_eq!(
-        out.exit_code, Some(0),
-        "ro+/tmp:rw 模式下写 /tmp 应允许, stderr={:?}", out.stderr
+        out.exit_code,
+        Some(0),
+        "ro+/tmp:rw 模式下写 /tmp 应允许, stderr={:?}",
+        out.stderr
     );
     let _ = std::fs::remove_file(&target);
 }
 
 #[test]
 fn cli_landlock_all_allows_ioctl_dev() {
-    if skip_unless_landlock_active() { return; }
+    if skip_unless_landlock_active() {
+        return;
+    }
     // all 应包含 refer + ioctl-dev；简单验证 exit_code 正常
-    let out = run_cli(&[
-        "run", "--landlock", "/tmp:all", "--", "sh", "-c",
-        "echo ok",
-    ]);
+    let out = run_cli(&["run", "--landlock", "/tmp:all", "--", "sh", "-c", "echo ok"]);
     assert_eq!(
-        out.exit_code, Some(0),
-        "all 模式下运行基本命令应成功, stderr={:?}", out.stderr
+        out.exit_code,
+        Some(0),
+        "all 模式下运行基本命令应成功, stderr={:?}",
+        out.stderr
     );
 }
 
 #[test]
 fn cli_landlock_multiple_rules_combined() {
-    if skip_unless_landlock_active() { return; }
+    if skip_unless_landlock_active() {
+        return;
+    }
     let target = format!("/tmp/.sandbox_ll_multi_test");
     let out = run_cli(&[
         "run",
-        "--landlock", "/etc:ro",
-        "--landlock", "/tmp:rw",
-        "--", "sh", "-c",
+        "--landlock",
+        "/etc:ro",
+        "--landlock",
+        "/tmp:rw",
+        "--",
+        "sh",
+        "-c",
         &format!("echo ok > {target} && cat /etc/hostname > /dev/null"),
     ]);
     assert_eq!(
-        out.exit_code, Some(0),
-        "多规则组合应正常工作, stderr={:?}", out.stderr
+        out.exit_code,
+        Some(0),
+        "多规则组合应正常工作, stderr={:?}",
+        out.stderr
     );
     let _ = std::fs::remove_file(&target);
 }

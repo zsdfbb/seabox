@@ -78,6 +78,34 @@ pub struct LandlockRule {
 }
 
 // ---------------------------------------------------------------------------
+// NamespaceType
+// ---------------------------------------------------------------------------
+
+/// Linux 命名空间类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NamespaceType {
+    User,
+    Ipc,
+    Pid,
+    Net,
+    Uts,
+    Cgroup,
+}
+
+impl std::fmt::Display for NamespaceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::User => write!(f, "user"),
+            Self::Ipc => write!(f, "ipc"),
+            Self::Pid => write!(f, "pid"),
+            Self::Net => write!(f, "net"),
+            Self::Uts => write!(f, "uts"),
+            Self::Cgroup => write!(f, "cgroup"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DenyMechanism
 // ---------------------------------------------------------------------------
 
@@ -179,9 +207,5 @@ pub trait Sandbox: Send + Sync {
     ///
     /// `blocked` 仅在 seccomp 命中黑名单（子进程被 SIGSYS 杀死）时有值，
     /// 由实现从 `/proc/<pid>/syscall` post-mortem 读取。
-    fn classify_exit(
-        &self,
-        exit_code: i32,
-        blocked: Option<(u32, u32)>,
-    ) -> ExitReason;
+    fn classify_exit(&self, exit_code: i32, blocked: Option<(u32, u32)>) -> ExitReason;
 }

@@ -42,6 +42,8 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
+    pub namespaces: NamespacesConfig,
+    #[serde(default)]
     pub timeout: TimeoutConfig,
 }
 
@@ -81,6 +83,7 @@ impl SandboxConfig {
 pub struct SandboxConfigBuilder {
     landlock: Vec<LandlockRule>,
     network_enabled: bool,
+    namespaces: NamespacesConfig,
     timeout_default_secs: u64,
     timeout_max_secs: u64,
 }
@@ -90,6 +93,7 @@ impl Default for SandboxConfigBuilder {
         Self {
             landlock: Vec::new(),
             network_enabled: false,
+            namespaces: NamespacesConfig::default(),
             timeout_default_secs: 30,
             timeout_max_secs: 300,
         }
@@ -106,6 +110,28 @@ impl SandboxConfigBuilder {
     /// 启用或禁用网络访问（Phase 1：仅占位）。
     pub fn network_enabled(mut self, enabled: bool) -> Self {
         self.network_enabled = enabled;
+        self
+    }
+
+    /// 直接设置 NamespacesConfig。
+    pub fn namespaces(mut self, ns: NamespacesConfig) -> Self {
+        self.namespaces = ns;
+        self
+    }
+
+    /// 启用全部命名空间隔离（user/ipc/pid/net/uts/cgroup）。
+    ///
+    /// 不包括 `user_try` 和 `cgroup_try` 变体。
+    pub fn unshare_all(mut self) -> Self {
+        self.namespaces = NamespacesConfig {
+            user: true,
+            ipc: true,
+            pid: true,
+            net: true,
+            uts: true,
+            cgroup: true,
+            ..self.namespaces
+        };
         self
     }
 
@@ -128,6 +154,7 @@ impl SandboxConfigBuilder {
             network: NetworkConfig {
                 enabled: self.network_enabled,
             },
+            namespaces: self.namespaces,
             timeout: TimeoutConfig {
                 default_secs: self.timeout_default_secs,
                 max_secs: self.timeout_max_secs,
@@ -151,19 +178,11 @@ impl SandboxConfigBuilder {
 /// [filesystem]
 /// landlock = [{ path = "/", perms = ["ro"] }]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilesystemConfig {
     /// Landlock 路径权限规则。
     #[serde(default)]
     pub landlock: Vec<LandlockRule>,
-}
-
-impl Default for FilesystemConfig {
-    fn default() -> Self {
-        Self {
-            landlock: Vec::new(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +197,51 @@ pub struct NetworkConfig {
     /// 是否启用网络访问。
     #[serde(default)]
     pub enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// NamespacesConfig
+// ---------------------------------------------------------------------------
+
+/// Linux 命名空间隔离配置。
+///
+/// 控制哪些命名空间被 unshare(2) 隔离。
+/// `user_try` / `cgroup_try` 是软性选项：若内核不支持则静默回退，不报错。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NamespacesConfig {
+    /// 隔离 user 命名空间（需要 `CAP_SETUID`、`CAP_SETGID`）。
+    #[serde(default)]
+    pub user: bool,
+    /// 隔离 IPC 命名空间。
+    #[serde(default)]
+    pub ipc: bool,
+    /// 隔离 PID 命名空间。
+    #[serde(default)]
+    pub pid: bool,
+    /// 隔离网络命名空间。
+    #[serde(default)]
+    pub net: bool,
+    /// 隔离 UTS（hostname）命名空间。
+    #[serde(default)]
+    pub uts: bool,
+    /// 隔离 cgroup 命名空间。
+    #[serde(default)]
+    pub cgroup: bool,
+    /// 软性 user 命名空间（内核不支持时静默回退）。
+    #[serde(default)]
+    pub user_try: bool,
+    /// 软性 cgroup 命名空间（内核不支持时静默回退）。
+    #[serde(default)]
+    pub cgroup_try: bool,
+    /// 在 user 命名空间中映射的 uid（仅在 `user` 或 `user_try` 生效时使用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// 在 user 命名空间中映射的 gid（仅在 `user` 或 `user_try` 生效时使用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    /// 在 UTS 命名空间中设置的 hostname（仅在 `uts` 生效时使用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -305,9 +369,18 @@ mod tests {
         ];
         let config = SandboxConfig::builder()
             .landlock(vec![
-                LandlockRule { path: "/".into(), perms: ro_perms.clone() },
-                LandlockRule { path: "/tmp".into(), perms: rw_perms.clone() },
-                LandlockRule { path: "./output".into(), perms: rw_perms },
+                LandlockRule {
+                    path: "/".into(),
+                    perms: ro_perms.clone(),
+                },
+                LandlockRule {
+                    path: "/tmp".into(),
+                    perms: rw_perms.clone(),
+                },
+                LandlockRule {
+                    path: "./output".into(),
+                    perms: rw_perms,
+                },
             ])
             .network_enabled(true)
             .timeout(60, 600)
@@ -343,7 +416,9 @@ mod tests {
     #[test]
     fn test_from_toml_nonexistent() {
         let err = SandboxConfig::from_toml("/nonexistent/path.toml").unwrap_err();
-        assert!(err.to_string().contains("No such file") || err.to_string().contains("file not found"));
+        assert!(
+            err.to_string().contains("No such file") || err.to_string().contains("file not found")
+        );
     }
 
     #[test]
@@ -368,11 +443,18 @@ mod tests {
         let config = SandboxConfig {
             filesystem: FilesystemConfig {
                 landlock: vec![
-                    LandlockRule { path: "/".into(), perms: ro_perms.clone() },
-                    LandlockRule { path: "/data".into(), perms: rw_perms.clone() },
+                    LandlockRule {
+                        path: "/".into(),
+                        perms: ro_perms.clone(),
+                    },
+                    LandlockRule {
+                        path: "/data".into(),
+                        perms: rw_perms.clone(),
+                    },
                 ],
             },
             network: NetworkConfig { enabled: false },
+            namespaces: NamespacesConfig::default(),
             timeout: TimeoutConfig {
                 default_secs: 60,
                 max_secs: 600,
@@ -450,7 +532,10 @@ landlock = []
 landlock = [{ path = "/", perms = ["invalid-perm"] }]
 "#;
         let result: Result<SandboxConfig, _> = toml::from_str(toml_str);
-        assert!(result.is_err(), "invalid landlock perm should fail to deserialise");
+        assert!(
+            result.is_err(),
+            "invalid landlock perm should fail to deserialise"
+        );
     }
 
     #[test]
@@ -481,5 +566,157 @@ landlock = [{ path = "/", perms = ["invalid-perm"] }]
         let expanded = expand_tilde(config.filesystem.landlock[0].path.to_str().unwrap());
         assert!(!expanded.starts_with("~/"));
         assert!(expanded.ends_with("/workspace"));
+    }
+
+    // -----------------------------------------------------------------------
+    // NamespacesConfig 测试
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_namespaces_default_values() {
+        let ns = NamespacesConfig::default();
+        assert!(!ns.user);
+        assert!(!ns.ipc);
+        assert!(!ns.pid);
+        assert!(!ns.net);
+        assert!(!ns.uts);
+        assert!(!ns.cgroup);
+        assert!(!ns.user_try);
+        assert!(!ns.cgroup_try);
+        assert!(ns.uid.is_none());
+        assert!(ns.gid.is_none());
+        assert!(ns.hostname.is_none());
+    }
+
+    #[test]
+    fn test_namespaces_builder_unshare_all() {
+        let config = SandboxConfig::builder().unshare_all().build();
+        assert!(config.namespaces.user);
+        assert!(config.namespaces.ipc);
+        assert!(config.namespaces.pid);
+        assert!(config.namespaces.net);
+        assert!(config.namespaces.uts);
+        assert!(config.namespaces.cgroup);
+        // unshare_all 不影响 try 变体
+        assert!(!config.namespaces.user_try);
+        assert!(!config.namespaces.cgroup_try);
+    }
+
+    #[test]
+    fn test_namespaces_serialize_deserialize() {
+        let ns = NamespacesConfig {
+            user: true,
+            ipc: true,
+            pid: false,
+            net: true,
+            uts: false,
+            cgroup: false,
+            user_try: false,
+            cgroup_try: true,
+            uid: Some(1000),
+            gid: Some(100),
+            hostname: Some("sandbox".into()),
+        };
+        let toml_str = toml::to_string(&ns).expect("serialisation should succeed");
+        let deserialised: NamespacesConfig =
+            toml::from_str(&toml_str).expect("deserialisation should succeed");
+
+        assert!(deserialised.user);
+        assert!(deserialised.ipc);
+        assert!(!deserialised.pid);
+        assert!(deserialised.net);
+        assert!(!deserialised.uts);
+        assert!(!deserialised.cgroup);
+        assert!(!deserialised.user_try);
+        assert!(deserialised.cgroup_try);
+        assert_eq!(deserialised.uid, Some(1000));
+        assert_eq!(deserialised.gid, Some(100));
+        assert_eq!(deserialised.hostname, Some("sandbox".into()));
+    }
+
+    #[test]
+    fn test_namespaces_toml_parse() {
+        let toml_str = r#"
+user = true
+pid = true
+net = true
+uts = true
+uid = 1000
+hostname = "sandbox-vm"
+"#;
+        let ns: NamespacesConfig = toml::from_str(toml_str).expect("TOML should parse");
+        assert!(ns.user);
+        assert!(!ns.ipc);
+        assert!(ns.pid);
+        assert!(ns.net);
+        assert!(ns.uts);
+        assert!(!ns.cgroup);
+        assert!(!ns.user_try);
+        assert!(!ns.cgroup_try);
+        assert_eq!(ns.uid, Some(1000));
+        assert!(ns.gid.is_none());
+        assert_eq!(ns.hostname, Some("sandbox-vm".into()));
+    }
+
+    #[test]
+    fn test_namespaces_toml_parse_sandboxconfig() {
+        let toml_str = r#"
+[filesystem]
+landlock = [{ path = "/", perms = ["execute", "read-file", "read-dir"] }]
+
+[network]
+enabled = false
+
+[namespaces]
+user = true
+pid = true
+net = true
+uts = true
+uid = 1000
+hostname = "sandbox-vm"
+
+[timeout]
+default_secs = 30
+max_secs = 300
+"#;
+        let config: SandboxConfig = toml::from_str(toml_str).expect("TOML should parse");
+        assert!(config.namespaces.user);
+        assert!(!config.namespaces.ipc);
+        assert!(config.namespaces.pid);
+        assert!(config.namespaces.net);
+        assert!(config.namespaces.uts);
+        assert!(!config.namespaces.cgroup);
+        assert_eq!(config.namespaces.uid, Some(1000));
+        assert_eq!(config.namespaces.hostname, Some("sandbox-vm".into()));
+        assert_eq!(config.network.enabled, false);
+        assert_eq!(config.timeout.default_secs, 30);
+    }
+
+    #[test]
+    fn test_sandboxconfig_with_namespaces() {
+        let config = SandboxConfig {
+            filesystem: FilesystemConfig { landlock: vec![] },
+            network: NetworkConfig { enabled: false },
+            namespaces: NamespacesConfig {
+                user: true,
+                pid: true,
+                net: true,
+                ..NamespacesConfig::default()
+            },
+            timeout: TimeoutConfig {
+                default_secs: 30,
+                max_secs: 300,
+            },
+        };
+        let toml_str = toml::to_string(&config).expect("serialisation should succeed");
+        let deserialised: SandboxConfig =
+            toml::from_str(&toml_str).expect("deserialisation should succeed");
+
+        assert!(deserialised.namespaces.user);
+        assert!(deserialised.namespaces.pid);
+        assert!(deserialised.namespaces.net);
+        assert!(!deserialised.namespaces.ipc);
+        assert!(!deserialised.namespaces.uts);
+        assert!(!deserialised.namespaces.cgroup);
     }
 }

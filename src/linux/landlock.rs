@@ -23,8 +23,8 @@
 use std::path::{Path, PathBuf};
 
 use landlock::{
-    Access, AccessFs, BitFlags, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreated,
-    RulesetCreatedAttr, path_beneath_rules, ABI,
+    path_beneath_rules, Access, AccessFs, BitFlags, CompatLevel, Compatible, Ruleset, RulesetAttr,
+    RulesetCreated, RulesetCreatedAttr, ABI,
 };
 
 use crate::{LandlockPerm, LandlockRule};
@@ -132,9 +132,10 @@ fn get_effective_abi() -> ABI {
 ///
 /// 每条 [`LandlockRule`] 指定一个路径和一组权限。
 /// 空 rules 表示不激活 Landlock。
+#[allow(clippy::assign_op_pattern)]
 pub fn build_ruleset(
     rules: &[LandlockRule],
-    cwd: &Path,
+    _cwd: &Path,
 ) -> anyhow::Result<Option<RulesetCreated>> {
     if rules.is_empty() {
         return Ok(None);
@@ -206,11 +207,17 @@ mod tests {
         let available = is_available();
         let version = get_abi_version();
         if available {
-            assert!(version.is_some(), "Landlock available => version must be Some");
+            assert!(
+                version.is_some(),
+                "Landlock available => version must be Some"
+            );
             let v = version.unwrap();
             assert!(v >= 1, "ABI version must be >= 1, got {v}");
         } else {
-            assert!(version.is_none(), "Landlock unavailable => version must be None");
+            assert!(
+                version.is_none(),
+                "Landlock unavailable => version must be None"
+            );
         }
     }
 
@@ -294,9 +301,18 @@ mod tests {
             LandlockPerm::ReadDir,
         ];
         let rules = vec![
-            LandlockRule { path: "/tmp".into(), perms: rw_perms },
-            LandlockRule { path: "/usr".into(), perms: ro_perms.clone() },
-            LandlockRule { path: "/etc".into(), perms: ro_perms },
+            LandlockRule {
+                path: "/tmp".into(),
+                perms: rw_perms,
+            },
+            LandlockRule {
+                path: "/usr".into(),
+                perms: ro_perms.clone(),
+            },
+            LandlockRule {
+                path: "/etc".into(),
+                perms: ro_perms,
+            },
         ];
         let result = build_ruleset(&rules, Path::new("/tmp"));
         assert!(result.is_ok());
@@ -352,8 +368,14 @@ mod tests {
             LandlockPerm::Truncate,
         ];
         let rules = vec![
-            LandlockRule { path: "/tmp".into(), perms: rw_perms.clone() },
-            LandlockRule { path: "/tmp".into(), perms: rw_perms },
+            LandlockRule {
+                path: "/tmp".into(),
+                perms: rw_perms.clone(),
+            },
+            LandlockRule {
+                path: "/tmp".into(),
+                perms: rw_perms,
+            },
         ];
         let result = build_ruleset(&rules, Path::new("/tmp"));
         assert!(result.is_ok());

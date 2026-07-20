@@ -542,11 +542,7 @@ fn normal_exit_does_not_hang_worker() {
     };
 
     let start = std::time::Instant::now();
-    let out = run_cli(&[
-        "run",
-        "--",
-        true_path,
-    ]);
+    let out = run_cli(&["run", "--", true_path]);
     let elapsed = start.elapsed();
 
     // 1. 退出码正确

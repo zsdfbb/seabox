@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 
+use sandbox_runtime::config::NamespacesConfig;
 use sandbox_runtime::config::SandboxConfig;
 use sandbox_runtime::{CommandSpec, ExitReason, LandlockPerm, LandlockRule, Sandbox};
 
@@ -29,6 +31,54 @@ enum Cli {
         /// 启用调试输出
         #[arg(short = 'd', long)]
         debug: bool,
+
+        /// 所有的命名空间隔离
+        #[arg(long)]
+        unshare_all: bool,
+
+        /// User 命名空间隔离
+        #[arg(long)]
+        unshare_user: bool,
+        /// IPC 命名空间隔离
+        #[arg(long)]
+        unshare_ipc: bool,
+        /// PID 命名空间隔离
+        #[arg(long)]
+        unshare_pid: bool,
+        /// 网络命名空间隔离
+        #[arg(long)]
+        unshare_net: bool,
+        /// UTS 命名空间隔离
+        #[arg(long)]
+        unshare_uts: bool,
+        /// Cgroup 命名空间隔离
+        #[arg(long)]
+        unshare_cgroup: bool,
+
+        /// 软性 User 命名空间（内核不支持时静默回退）
+        #[arg(long)]
+        unshare_user_try: bool,
+        /// 软性 Cgroup 命名空间（内核不支持时静默回退）
+        #[arg(long)]
+        unshare_cgroup_try: bool,
+
+        /// 在 user 命名空间中映射的 uid
+        #[arg(long)]
+        uid: Option<u32>,
+        /// 在 user 命名空间中映射的 gid
+        #[arg(long)]
+        gid: Option<u32>,
+        /// 在 UTS 命名空间中设置的 hostname
+        #[arg(long)]
+        hostname: Option<String>,
+
+        /// 覆盖工作目录（而非默认的 cwd）
+        #[arg(long)]
+        chdir: Option<PathBuf>,
+
+        /// 清空环境变量
+        #[arg(long)]
+        clearenv: bool,
 
         /// 要执行的命令（trailing 参数；使用 -- 进行分隔）
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -59,7 +109,40 @@ fn main() -> anyhow::Result<()> {
             allow_network,
             debug,
             command,
-        } => cmd_run(landlock, allow_network, debug, command),
+            unshare_all,
+            unshare_user,
+            unshare_ipc,
+            unshare_pid,
+            unshare_net,
+            unshare_uts,
+            unshare_cgroup,
+            unshare_user_try,
+            unshare_cgroup_try,
+            uid,
+            gid,
+            hostname,
+            chdir,
+            clearenv,
+        } => cmd_run(
+            landlock,
+            allow_network,
+            debug,
+            command,
+            unshare_all,
+            unshare_user,
+            unshare_ipc,
+            unshare_pid,
+            unshare_net,
+            unshare_uts,
+            unshare_cgroup,
+            unshare_user_try,
+            unshare_cgroup_try,
+            uid,
+            gid,
+            hostname,
+            chdir,
+            clearenv,
+        ),
         Cli::Check => cmd_check(),
         Cli::Serve { port } => cmd_serve(port),
     }
@@ -70,11 +153,27 @@ fn main() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     landlock: Vec<String>,
     allow_network: bool,
     _debug: bool,
     command: Vec<String>,
+    // namespace flags
+    unshare_all: bool,
+    unshare_user: bool,
+    unshare_ipc: bool,
+    unshare_pid: bool,
+    unshare_net: bool,
+    unshare_uts: bool,
+    unshare_cgroup: bool,
+    unshare_user_try: bool,
+    unshare_cgroup_try: bool,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    hostname: Option<String>,
+    chdir: Option<PathBuf>,
+    clearenv: bool,
 ) -> anyhow::Result<()> {
     if command.is_empty() {
         anyhow::bail!(
@@ -84,18 +183,57 @@ fn cmd_run(
         );
     }
 
-    let config = build_config(landlock, allow_network)?;
+    // --uid/--gid 需要 --unshare-user
+    if uid.is_some() && !unshare_user && !unshare_all {
+        anyhow::bail!("--uid requires --unshare-user or --unshare-all");
+    }
+    if gid.is_some() && !unshare_user && !unshare_all {
+        anyhow::bail!("--gid requires --unshare-user or --unshare-all");
+    }
+    // --hostname 需要 --unshare-uts
+    if hostname.is_some() && !unshare_uts && !unshare_all {
+        anyhow::bail!("--hostname requires --unshare-uts or --unshare-all");
+    }
+
+    let config = build_config(
+        landlock,
+        allow_network,
+        unshare_all,
+        unshare_user,
+        unshare_ipc,
+        unshare_pid,
+        unshare_net,
+        unshare_uts,
+        unshare_cgroup,
+        unshare_user_try,
+        unshare_cgroup_try,
+        uid,
+        gid,
+        hostname,
+    )?;
 
     let sandbox = LinuxSandbox { config };
 
     let program = command[0].clone();
     let args = command[1..].to_vec();
-    let env: HashMap<String, String> = std::env::vars().collect();
+
+    // 处理 --clearenv
+    let env: HashMap<String, String> = if clearenv {
+        HashMap::new()
+    } else {
+        std::env::vars().collect()
+    };
+
+    // 处理 --chdir（覆盖默认 cwd）
+    let cwd = match chdir {
+        Some(path) => path,
+        None => std::env::current_dir()?,
+    };
 
     let spec = CommandSpec {
         program,
         args,
-        cwd: std::env::current_dir()?,
+        cwd,
         env,
         timeout: Duration::from_secs(sandbox.config.timeout.default_secs),
     };
@@ -129,6 +267,20 @@ fn cmd_run(
     _allow_network: bool,
     _debug: bool,
     _command: Vec<String>,
+    _unshare_all: bool,
+    _unshare_user: bool,
+    _unshare_ipc: bool,
+    _unshare_pid: bool,
+    _unshare_net: bool,
+    _unshare_uts: bool,
+    _unshare_cgroup: bool,
+    _unshare_user_try: bool,
+    _unshare_cgroup_try: bool,
+    _uid: Option<u32>,
+    _gid: Option<u32>,
+    _hostname: Option<String>,
+    _chdir: Option<PathBuf>,
+    _clearenv: bool,
 ) -> anyhow::Result<()> {
     anyhow::bail!(
         "sandbox-runtime run requires Linux; \
@@ -165,6 +317,54 @@ fn cmd_check() -> anyhow::Result<()> {
                 "not available"
             }
         );
+        println!(
+            "User namespace                {}",
+            if linux::namespaces::is_user_namespace_available() {
+                "available"
+            } else {
+                "not available"
+            }
+        );
+        println!(
+            "IPC namespace                 {}",
+            if linux::namespaces::is_ipc_namespace_available() {
+                "available"
+            } else {
+                "not available"
+            }
+        );
+        println!(
+            "PID namespace                 {}",
+            if linux::namespaces::is_pid_namespace_available() {
+                "available"
+            } else {
+                "not available"
+            }
+        );
+        println!(
+            "Network namespace             {}",
+            if linux::namespaces::is_net_namespace_available() {
+                "available"
+            } else {
+                "not available"
+            }
+        );
+        println!(
+            "UTS namespace                 {}",
+            if linux::namespaces::is_uts_namespace_available() {
+                "available"
+            } else {
+                "not available"
+            }
+        );
+        println!(
+            "Cgroup namespace              {}",
+            if linux::namespaces::is_cgroup_namespace_available() {
+                "available"
+            } else {
+                "not available"
+            }
+        );
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -173,6 +373,12 @@ fn cmd_check() -> anyhow::Result<()> {
         println!("----------------------------- --------------------");
         println!("Landlock                      not available (non-Linux)");
         println!("Seccomp                       not available (non-Linux)");
+        println!("User namespace                not available (non-Linux)");
+        println!("IPC namespace                 not available (non-Linux)");
+        println!("PID namespace                 not available (non-Linux)");
+        println!("Network namespace             not available (non-Linux)");
+        println!("UTS namespace                 not available (non-Linux)");
+        println!("Cgroup namespace              not available (non-Linux)");
     }
 
     Ok(())
@@ -191,12 +397,45 @@ fn cmd_serve(port: u16) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// 从 CLI flags 构建一个 [`SandboxConfig`]。
-fn build_config(landlock: Vec<String>, allow_network: bool) -> anyhow::Result<SandboxConfig> {
+#[allow(clippy::too_many_arguments)]
+fn build_config(
+    landlock: Vec<String>,
+    allow_network: bool,
+    // namespace flags
+    unshare_all: bool,
+    unshare_user: bool,
+    unshare_ipc: bool,
+    unshare_pid: bool,
+    unshare_net: bool,
+    unshare_uts: bool,
+    unshare_cgroup: bool,
+    unshare_user_try: bool,
+    unshare_cgroup_try: bool,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    hostname: Option<String>,
+) -> anyhow::Result<SandboxConfig> {
     let rules = landlock
         .iter()
         .map(|s| parse_landlock_spec(s))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(SandboxConfig::builder().landlock(rules).network_enabled(allow_network).build())
+    Ok(SandboxConfig::builder()
+        .landlock(rules)
+        .network_enabled(allow_network)
+        .namespaces(NamespacesConfig {
+            user: unshare_user || unshare_all,
+            ipc: unshare_ipc || unshare_all,
+            pid: unshare_pid || unshare_all,
+            net: unshare_net || unshare_all,
+            uts: unshare_uts || unshare_all,
+            cgroup: unshare_cgroup || unshare_all,
+            user_try: unshare_user_try,
+            cgroup_try: unshare_cgroup_try,
+            uid,
+            gid,
+            hostname,
+        })
+        .build())
 }
 
 /// 解析 --landlock 参数：path:perm1[,perm2...]
@@ -204,10 +443,7 @@ fn parse_landlock_spec(s: &str) -> anyhow::Result<LandlockRule> {
     let (path, perms_str) = s.split_once(':').ok_or_else(|| {
         anyhow::anyhow!("invalid --landlock spec '{s}'; expected format: path:perm1[,perm2...]")
     })?;
-    let perms = perms_str
-        .split(',')
-        .flat_map(expand_perm)
-        .collect();
+    let perms = perms_str.split(',').flat_map(expand_perm).collect();
     Ok(LandlockRule {
         path: path.into(),
         perms,

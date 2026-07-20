@@ -300,24 +300,89 @@ impl Syscall {
 /// **单一数据源：** `BLACKLIST` 数组通过本表的索引引用具体 syscall。
 pub static SYSCALLS: &[Syscall] = &[
     // ----- MountFilesystem -----
-    Syscall { name: "mount", category: SyscallCategory::MountFilesystem, nr_x86_64: 165, nr_aarch64: 40 },
-    Syscall { name: "umount2", category: SyscallCategory::MountFilesystem, nr_x86_64: 166, nr_aarch64: 39 },
-    Syscall { name: "pivot_root", category: SyscallCategory::MountFilesystem, nr_x86_64: 155, nr_aarch64: 41 },
-    Syscall { name: "chroot", category: SyscallCategory::MountFilesystem, nr_x86_64: 161, nr_aarch64: 51 },
+    Syscall {
+        name: "mount",
+        category: SyscallCategory::MountFilesystem,
+        nr_x86_64: 165,
+        nr_aarch64: 40,
+    },
+    Syscall {
+        name: "umount2",
+        category: SyscallCategory::MountFilesystem,
+        nr_x86_64: 166,
+        nr_aarch64: 39,
+    },
+    Syscall {
+        name: "pivot_root",
+        category: SyscallCategory::MountFilesystem,
+        nr_x86_64: 155,
+        nr_aarch64: 41,
+    },
+    Syscall {
+        name: "chroot",
+        category: SyscallCategory::MountFilesystem,
+        nr_x86_64: 161,
+        nr_aarch64: 51,
+    },
     // ----- DebugTrace -----
-    Syscall { name: "ptrace", category: SyscallCategory::DebugTrace, nr_x86_64: 101, nr_aarch64: 117 },
+    Syscall {
+        name: "ptrace",
+        category: SyscallCategory::DebugTrace,
+        nr_x86_64: 101,
+        nr_aarch64: 117,
+    },
     // ----- Boot -----
-    Syscall { name: "kexec_load", category: SyscallCategory::Boot, nr_x86_64: 246, nr_aarch64: 104 },
-    Syscall { name: "kexec_file_load", category: SyscallCategory::Boot, nr_x86_64: 320, nr_aarch64: 294 },
-    Syscall { name: "reboot", category: SyscallCategory::Boot, nr_x86_64: 169, nr_aarch64: 142 },
+    Syscall {
+        name: "kexec_load",
+        category: SyscallCategory::Boot,
+        nr_x86_64: 246,
+        nr_aarch64: 104,
+    },
+    Syscall {
+        name: "kexec_file_load",
+        category: SyscallCategory::Boot,
+        nr_x86_64: 320,
+        nr_aarch64: 294,
+    },
+    Syscall {
+        name: "reboot",
+        category: SyscallCategory::Boot,
+        nr_x86_64: 169,
+        nr_aarch64: 142,
+    },
     // ----- KernelModule -----
-    Syscall { name: "init_module", category: SyscallCategory::KernelModule, nr_x86_64: 175, nr_aarch64: 105 },
-    Syscall { name: "finit_module", category: SyscallCategory::KernelModule, nr_x86_64: 313, nr_aarch64: 106 },
-    Syscall { name: "delete_module", category: SyscallCategory::KernelModule, nr_x86_64: 176, nr_aarch64: 107 },
+    Syscall {
+        name: "init_module",
+        category: SyscallCategory::KernelModule,
+        nr_x86_64: 175,
+        nr_aarch64: 105,
+    },
+    Syscall {
+        name: "finit_module",
+        category: SyscallCategory::KernelModule,
+        nr_x86_64: 313,
+        nr_aarch64: 106,
+    },
+    Syscall {
+        name: "delete_module",
+        category: SyscallCategory::KernelModule,
+        nr_x86_64: 176,
+        nr_aarch64: 107,
+    },
     // ----- Namespace -----
-    Syscall { name: "unshare", category: SyscallCategory::Namespace, nr_x86_64: 97, nr_aarch64: 97 },
+    Syscall {
+        name: "unshare",
+        category: SyscallCategory::Namespace,
+        nr_x86_64: 97,
+        nr_aarch64: 97,
+    },
     // ----- BpfLoader -----
-    Syscall { name: "bpf", category: SyscallCategory::BpfLoader, nr_x86_64: 357, nr_aarch64: 280 },
+    Syscall {
+        name: "bpf",
+        category: SyscallCategory::BpfLoader,
+        nr_x86_64: 357,
+        nr_aarch64: 280,
+    },
 ];
 
 /// 黑名单 = 索引到 `SYSCALLS` 的引用。当前与 `SYSCALLS` 一一对应；
@@ -615,8 +680,15 @@ mod tests {
     fn first_insn_loads_arch() {
         let filter = build_blacklist_filter();
         let insn = &filter[0];
-        assert_eq!(insn.code, BPF_LD | BPF_W | BPF_ABS, "insn 0: must load word from absolute offset");
-        assert_eq!(insn.k, 4, "insn 0: must load from seccomp_data.arch (offset 4)");
+        assert_eq!(
+            insn.code,
+            BPF_LD | BPF_W | BPF_ABS,
+            "insn 0: must load word from absolute offset"
+        );
+        assert_eq!(
+            insn.k, 4,
+            "insn 0: must load from seccomp_data.arch (offset 4)"
+        );
     }
 
     /// 第三条指令必须是架构不匹配的自杀指令。
@@ -625,7 +697,10 @@ mod tests {
         let filter = build_blacklist_filter();
         let insn = &filter[2];
         assert_eq!(insn.code, BPF_RET | BPF_K, "insn 2: must be RET");
-        assert_eq!(insn.k, SECCOMP_RET_KILL_PROCESS, "insn 2: must return KILL_PROCESS");
+        assert_eq!(
+            insn.k, SECCOMP_RET_KILL_PROCESS,
+            "insn 2: must return KILL_PROCESS"
+        );
     }
 
     /// 架构检查（指令 1）必须命中时跳到 LD nr（指令 3），
@@ -671,13 +746,22 @@ mod tests {
             let insn_idx = 4 + i;
             let expected_jt = (die_index - insn_idx - 1) as u8;
 
-            assert_eq!(insn.code, BPF_JMP | BPF_JEQ | BPF_K, "insn {}: expected JEQ opcode", insn_idx);
+            assert_eq!(
+                insn.code,
+                BPF_JMP | BPF_JEQ | BPF_K,
+                "insn {}: expected JEQ opcode",
+                insn_idx
+            );
             assert_eq!(
                 insn.jt, expected_jt,
                 "insn {}: jt should skip to die (die_index={}, insn_idx={}, expected_jt={})",
                 insn_idx, die_index, insn_idx, expected_jt
             );
-            assert_eq!(insn.jf, 0, "insn {}: jf should fall through to next check", insn_idx);
+            assert_eq!(
+                insn.jf, 0,
+                "insn {}: jf should fall through to next check",
+                insn_idx
+            );
         }
     }
 
@@ -705,8 +789,14 @@ mod tests {
             .iter()
             .find(|s| s.name == "unshare")
             .expect("SYSCALLS must contain unshare");
-        assert_eq!(unshare.nr_x86_64, 97, "unshare must be syscall 97 on x86_64");
-        assert_eq!(unshare.nr_aarch64, 97, "unshare must be syscall 97 on aarch64");
+        assert_eq!(
+            unshare.nr_x86_64, 97,
+            "unshare must be syscall 97 on x86_64"
+        );
+        assert_eq!(
+            unshare.nr_aarch64, 97,
+            "unshare must be syscall 97 on aarch64"
+        );
     }
 
     /// `SYSCALLS` 表内每个架构号列都不应重复。
@@ -715,12 +805,20 @@ mod tests {
         let mut x86_nrs: Vec<u32> = SYSCALLS.iter().map(|s| s.nr_x86_64).collect();
         x86_nrs.sort();
         x86_nrs.dedup();
-        assert_eq!(x86_nrs.len(), SYSCALLS.len(), "x86_64 syscall numbers must be unique");
+        assert_eq!(
+            x86_nrs.len(),
+            SYSCALLS.len(),
+            "x86_64 syscall numbers must be unique"
+        );
 
         let mut arm_nrs: Vec<u32> = SYSCALLS.iter().map(|s| s.nr_aarch64).collect();
         arm_nrs.sort();
         arm_nrs.dedup();
-        assert_eq!(arm_nrs.len(), SYSCALLS.len(), "aarch64 syscall numbers must be unique");
+        assert_eq!(
+            arm_nrs.len(),
+            SYSCALLS.len(),
+            "aarch64 syscall numbers must be unique"
+        );
     }
 
     /// `syscall_name` 应能按当前架构号解析出 syscall 名。
@@ -781,7 +879,10 @@ mod tests {
             let tag = c.tag();
             assert!(!tag.is_empty(), "tag must not be empty");
             assert!(!tag.contains(' '), "tag must not contain spaces: {tag:?}");
-            assert!(!tag.contains('_'), "tag must not contain underscores: {tag:?}");
+            assert!(
+                !tag.contains('_'),
+                "tag must not contain underscores: {tag:?}"
+            );
             assert!(
                 tag.chars().all(|ch| ch.is_ascii_lowercase()),
                 "tag must be all lowercase: {tag:?}"
@@ -818,8 +919,14 @@ mod tests {
             "SECCOMP_IOCTL_NOTIF_SEND must be an IOWR (read+write) ioctl"
         );
         // magic = '!' = 0x21（位 8..15）。
-        assert_eq!((SECCOMP_IOCTL_NOTIF_RECV >> 8) & 0xff, b'!' as libc::c_ulong);
-        assert_eq!((SECCOMP_IOCTL_NOTIF_SEND >> 8) & 0xff, b'!' as libc::c_ulong);
+        assert_eq!(
+            (SECCOMP_IOCTL_NOTIF_RECV >> 8) & 0xff,
+            b'!' as libc::c_ulong
+        );
+        assert_eq!(
+            (SECCOMP_IOCTL_NOTIF_SEND >> 8) & 0xff,
+            b'!' as libc::c_ulong
+        );
         // nr = 0 / 1（位 0..7）。
         assert_eq!(SECCOMP_IOCTL_NOTIF_RECV & 0xff, 0);
         assert_eq!(SECCOMP_IOCTL_NOTIF_SEND & 0xff, 1);
