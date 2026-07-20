@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 
 use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{CommandSpec, ExitReason, FsPolicy, Sandbox};
+use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
 
 #[cfg(target_os = "linux")]
 use sandbox_runtime::linux::{self, LinuxSandbox};
@@ -19,10 +18,6 @@ use sandbox_runtime::linux::{self, LinuxSandbox};
 enum Cli {
     /// 在沙箱内运行一条命令
     Run {
-        /// TOML 配置文件的路径
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
         /// 沙箱策略：full-access、read-only、workspace
         #[arg(short = 'p', long)]
         policy: Option<String>,
@@ -64,13 +59,12 @@ fn main() -> anyhow::Result<()> {
 
     match cli {
         Cli::Run {
-            config,
             policy,
             allow_network,
             allow_write,
             debug,
             command,
-        } => cmd_run(config, policy, allow_network, allow_write, debug, command),
+        } => cmd_run(policy, allow_network, allow_write, debug, command),
         Cli::Check => cmd_check(),
         Cli::Serve { port } => cmd_serve(port),
     }
@@ -82,7 +76,6 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(target_os = "linux")]
 fn cmd_run(
-    config_path: Option<PathBuf>,
     policy: Option<String>,
     allow_network: bool,
     allow_write: Vec<String>,
@@ -97,7 +90,7 @@ fn cmd_run(
         );
     }
 
-    let config = build_config(config_path, policy, allow_network, allow_write)?;
+    let config = build_config(policy, allow_network, allow_write)?;
 
     let sandbox = LinuxSandbox { config };
 
@@ -140,7 +133,6 @@ fn cmd_run(
 
 #[cfg(not(target_os = "linux"))]
 fn cmd_run(
-    _config_path: Option<PathBuf>,
     _policy: Option<String>,
     _allow_network: bool,
     _allow_write: Vec<String>,
@@ -207,46 +199,15 @@ fn cmd_serve(port: u16) -> anyhow::Result<()> {
 // 配置辅助函数
 // ---------------------------------------------------------------------------
 
-/// 通过合并可选的 TOML 配置与 CLI flags 来构建一个 [`SandboxConfig`]。
-///
-/// CLI flag 优先于从 TOML 加载的值：
-/// - `--policy` 覆盖 `filesystem.policy`
-/// - `--allow-write` 完全替换 `filesystem.allow_write`
-/// - `--allow-network` 设置 `network.enabled`
+/// 从 CLI flags 构建一个 [`SandboxConfig`]。
 fn build_config(
-    config_path: Option<PathBuf>,
     policy: Option<String>,
     allow_network: bool,
     allow_write: Vec<String>,
 ) -> anyhow::Result<SandboxConfig> {
-    let mut config = if let Some(path) = config_path {
-        SandboxConfig::from_toml(path)?
-    } else {
-        SandboxConfig::default()
-    };
-
-    // CLI flag 覆盖 TOML 值
+    let mut config = SandboxConfig::builder();
     if let Some(p) = policy {
-        config.filesystem.policy = parse_policy(&p)?;
+        config = config.policy(p.parse()?);
     }
-
-    if !allow_write.is_empty() {
-        config.filesystem.allow_write = allow_write;
-    }
-
-    config.network.enabled = allow_network;
-
-    Ok(config)
-}
-
-/// 将策略字符串解析为 [`FsPolicy`]。
-fn parse_policy(s: &str) -> anyhow::Result<FsPolicy> {
-    match s {
-        "full-access" => Ok(FsPolicy::FullAccess),
-        "read-only" => Ok(FsPolicy::ReadOnly),
-        "workspace" => Ok(FsPolicy::WorkspaceWrite),
-        other => anyhow::bail!(
-            "unknown policy '{other}'; expected one of: full-access, read-only, workspace"
-        ),
-    }
+    Ok(config.allow_write(allow_write).network_enabled(allow_network).build())
 }

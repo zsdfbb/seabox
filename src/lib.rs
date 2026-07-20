@@ -37,6 +37,18 @@ pub enum FsPolicy {
     WorkspaceWrite,
 }
 
+impl std::str::FromStr for FsPolicy {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "full-access" => Ok(FsPolicy::FullAccess),
+            "read-only" => Ok(FsPolicy::ReadOnly),
+            "workspace" => Ok(FsPolicy::WorkspaceWrite),
+            _ => anyhow::bail!("unknown policy '{s}'; expected one of: full-access, read-only, workspace"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DenyMechanism
 // ---------------------------------------------------------------------------
