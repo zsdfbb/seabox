@@ -231,20 +231,26 @@ fn clearenv_works() {
 }
 
 // ---------------------------------------------------------------------------
-// N8: --unshare-pid 基本功能
+// N8: --unshare-pid 基本功能（验证业务进程 PID=2，reaper 是 PID 1）
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unshare_pid_basic() {
+fn unshare_pid_isolates() {
     if skip_if_no_pid_ns() {
         return;
     }
-    let out = run_cli(&["run", "--unshare-pid", "--", "true"]);
+    let out = run_cli(&["run", "--unshare-pid", "--", "sh", "-c", "echo $$"]);
     assert_eq!(
         out.exit_code,
         Some(0),
-        "unshare-pid should succeed: {:?}",
+        "unshare-pid with echo $$ should succeed: {:?}",
         out
+    );
+    assert_eq!(
+        out.stdout.trim(),
+        "2",
+        "in PID namespace, business process PID should be 2 (reaper is PID 1), got: {:?}",
+        out.stdout
     );
 }
 

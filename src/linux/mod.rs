@@ -124,28 +124,18 @@ impl Sandbox for LinuxSandbox {
 
         // ── 计算 namespace 参数 ────────────────────────────────
         let ns = &self.config.namespaces;
+
+        // 常规 namespace（不含 PID，PID 通过 double-fork 单独处理）
         let ns_ops: Vec<(i32, bool)> = {
             let mut v = Vec::new();
-            if ns.user {
-                v.push((libc::CLONE_NEWUSER, ns.user_try));
-            }
-            if ns.ipc {
-                v.push((libc::CLONE_NEWIPC, false));
-            }
-            if ns.pid {
-                v.push((libc::CLONE_NEWPID, false));
-            }
-            if ns.net {
-                v.push((libc::CLONE_NEWNET, false));
-            }
-            if ns.uts {
-                v.push((libc::CLONE_NEWUTS, false));
-            }
-            if ns.cgroup {
-                v.push((libc::CLONE_NEWCGROUP, ns.cgroup_try));
-            }
+            if ns.user { v.push((libc::CLONE_NEWUSER, ns.user_try)); }
+            if ns.ipc  { v.push((libc::CLONE_NEWIPC, false)); }
+            if ns.net  { v.push((libc::CLONE_NEWNET, false)); }
+            if ns.uts  { v.push((libc::CLONE_NEWUTS, false)); }
+            if ns.cgroup { v.push((libc::CLONE_NEWCGROUP, ns.cgroup_try)); }
             v
         };
+        let need_pid_reaper = ns.pid;
 
         // ── 预计算 uid_map/gid_map 内容（如果 user ns）─────────────
         let real_uid: u32 = unsafe { libc::getuid() };
@@ -181,7 +171,7 @@ impl Sandbox for LinuxSandbox {
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .pre_exec(move || {
-                    // ── 第 1 步：逐个创建 namespace ───────────────────
+                    // ── 第 1 步：逐个创建常规 namespace（含 user ns）───────
                     let mut user_ns_active = false;
                     for &(flag, try_mode) in &ns_ops {
                         let ret = libc::syscall(libc::SYS_unshare, flag as libc::c_long);
@@ -196,41 +186,87 @@ impl Sandbox for LinuxSandbox {
                         }
                     }
 
-                    // ── 第 2 步：prctl(NO_NEW_PRIVS) ───────────────────
+                    // ── 第 2 步：PID namespace + double-fork reaper ───
+                    // 此时 user ns 已激活（如请求），进程拥有 CAP_SYS_ADMIN。
+                    if need_pid_reaper {
+                        let ret =
+                            libc::syscall(libc::SYS_unshare, libc::CLONE_NEWPID as libc::c_long);
+                        if ret != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+
+                        // 第一次 fork：创建中间进程（非 PID 1）和 PID 1
+                        let pid = libc::fork();
+                        if pid < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+
+                        if pid > 0 {
+                            // ── 中间进程（来自 spawn，非 PID 1）：等待 PID 1 → 转发退出码
+                            let mut status: i32 = 0;
+                            libc::waitpid(pid, &mut status, 0);
+                            let exit_code = if libc::WIFEXITED(status) {
+                                libc::WEXITSTATUS(status)
+                            } else if libc::WIFSIGNALED(status) {
+                                128 + libc::WTERMSIG(status)
+                            } else {
+                                1
+                            };
+                            libc::_exit(exit_code);
+                        }
+
+                        // ── PID 1 进程：第二次 fork，创建 reaper 和业务进程 ──
+                        let pid2 = libc::fork();
+                        if pid2 < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+
+                        if pid2 > 0 {
+                            // ── PID 1 (reaper)：等待业务进程 → 转发退出码 ──
+                            let mut status: i32 = 0;
+                            libc::waitpid(pid2, &mut status, 0);
+                            let exit_code = if libc::WIFEXITED(status) {
+                                libc::WEXITSTATUS(status)
+                            } else if libc::WIFSIGNALED(status) {
+                                128 + libc::WTERMSIG(status)
+                            } else {
+                                1
+                            };
+                            libc::_exit(exit_code);
+                        }
+                        // ── 业务进程（PID=2）：继续下面的 setup ──
+                    }
+
+                    // ── 第 3 步：prctl(NO_NEW_PRIVS) ───────────────────
                     // seccomp 和 Landlock（非 root 下）均需要 no_new_privs。
-                    // 放在 uid_map 之后没有问题——写 uid_map 不需要该标志。
                     let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
                     if ret != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
 
-                    // ── 第 3 步：如果 user ns 创建成功，写 uid/gid map ───
+                    // ── 第 4 步：uid/gid 映射 ──────────────────────────
                     if user_ns_active {
                         namespaces::write_ns_file(b"/proc/self/uid_map\0", &uid_map_content)?;
                         let _ = namespaces::write_ns_file(b"/proc/self/setgroups\0", b"deny\n");
                         namespaces::write_ns_file(b"/proc/self/gid_map\0", &gid_map_content)?;
                     }
 
-                    // ── 第 4 步：sethostname（如果设置了 hostname）───────
+                    // ── 第 5 步：sethostname ───────────────────────────
                     if let Some(ref h) = hostname_bytes {
                         namespaces::set_hostname(h)?;
                     }
 
-                    // ── 第 5 步：landlock_restrict_self ─────────────────
+                    // ── 第 6 步：landlock ──────────────────────────────
                     if raw_ruleset_fd >= 0 {
-                        // SAFETY：`raw_ruleset_fd` 是父进程经由
-                        // `landlock_create_ruleset(2)` 创建的有效 fd。
-                        // 内核会校验访问权限。
                         let ret =
                             libc::syscall(libc::SYS_landlock_restrict_self, raw_ruleset_fd, 0);
                         if ret != 0 {
                             return Err(std::io::Error::last_os_error());
                         }
-                        // 在子进程中关闭 fd，已经不再需要。
                         libc::close(raw_ruleset_fd);
                     }
 
-                    // ── 第 6 步：seccomp BPF filter ───────────────────
+                    // ── 第 7 步：seccomp BPF filter ───────────────────
                     let listener_fd = match seccomp::install_user_notif_filter(&bpf_filter) {
                         Ok(fd) => fd,
                         Err(_) => {
@@ -238,17 +274,13 @@ impl Sandbox for LinuxSandbox {
                         }
                     };
 
-                    // ── 第 7 步：sendmsg SCM_RIGHTS ───────────────────
+                    // ── 第 8 步：sendmsg SCM_RIGHTS ───────────────────
                     if let Err(e) = send_fd(child_fd_raw, listener_fd) {
                         libc::close(listener_fd);
                         libc::close(child_fd_raw);
                         return Err(e);
                     }
-                    // 子端 fd 已用过，关闭以避免泄漏到 exec 后的进程。
                     libc::close(child_fd_raw);
-                    // listener fd 留在本进程（不关）——execve 后 BPF filter
-                    // 仍在生效，但 listener 是由父进程持有的引用，
-                    // 子进程不再需要它。让它随 exec 自然消失即可。
 
                     Ok(())
                 })
