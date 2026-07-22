@@ -680,23 +680,27 @@ impl UserNotifHandle {
 ///
 /// 参照 bwrap `do_init()` 的实现。
 fn do_reaper(business_pid: libc::pid_t) -> i32 {
-    let mut exit_code = 1;
-    loop {
-        let mut status: i32 = 0;
-        let wpid = unsafe { libc::waitpid(-1, &mut status, 0) };
-        if wpid == business_pid {
-            exit_code = if unsafe { libc::WIFEXITED(status) } {
-                unsafe { libc::WEXITSTATUS(status) }
-            } else if unsafe { libc::WIFSIGNALED(status) } {
-                128 + unsafe { libc::WTERMSIG(status) }
-            } else {
-                1
-            };
-        } else if wpid < 0 {
-            break;
+    // SAFETY: 全部 libc 调用都是 async-signal-safe 的 waitpid/macro。
+    // 此函数只在 fork 后的 PID 1 单线程子进程中调用。
+    unsafe {
+        let mut exit_code = 1;
+        loop {
+            let mut status: i32 = 0;
+            let wpid = libc::waitpid(-1, &mut status, 0);
+            if wpid == business_pid {
+                exit_code = if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else if libc::WIFSIGNALED(status) {
+                    128 + libc::WTERMSIG(status)
+                } else {
+                    1
+                };
+            } else if wpid < 0 {
+                break;
+            }
         }
+        exit_code
     }
-    exit_code
 }
 
 fn spawn_user_notif_worker(
