@@ -233,26 +233,12 @@ impl Sandbox for LinuxSandbox {
                 // ── PID 1（init）：第二次 fork ──
                 let pid3 = unsafe { libc::fork() };
                 if pid3 < 0 {
-                    unsafe {
-                        libc::_exit(1);
-                    }
+                    unsafe { libc::_exit(1); }
                 }
                 if pid3 > 0 {
-                    // PID 1（reaper）：等待业务进程（PID 2）
-                    let mut status: i32 = 0;
-                    unsafe {
-                        libc::waitpid(pid3, &mut status, 0);
-                    }
-                    let exit_code = if libc::WIFEXITED(status) {
-                        libc::WEXITSTATUS(status)
-                    } else if libc::WIFSIGNALED(status) {
-                        128 + libc::WTERMSIG(status)
-                    } else {
-                        1
-                    };
-                    unsafe {
-                        libc::_exit(exit_code);
-                    }
+                    // PID 1（reaper）：等所有子进程退出后转发退出码
+                    let exit_code = do_reaper(pid3);
+                    unsafe { libc::_exit(exit_code); }
                 }
                 // ── PID 2（业务进程）：继续后续 setup ──
             }
@@ -685,6 +671,34 @@ impl UserNotifHandle {
 ///
 /// worker 在 `poll(listener_fd, -1)` 中等待 notification 或 POLLHUP。
 /// 子进程退出 → listener fd POLLHUP → worker 自然退出。
+
+/// PID namespace 的 init 进程（reaper）。
+///
+/// 循环 `waitpid(-1)` 收割所有子进程和托孤进程。
+/// 当业务进程（`business_pid`）退出时记录退出码，继续收割。
+/// 当 `waitpid` 返回 ECHILD（无子进程）时退出，返回业务进程退出码。
+///
+/// 参照 bwrap `do_init()` 的实现。
+fn do_reaper(business_pid: libc::pid_t) -> i32 {
+    let mut exit_code = 1;
+    loop {
+        let mut status: i32 = 0;
+        let wpid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if wpid == business_pid {
+            exit_code = if unsafe { libc::WIFEXITED(status) } {
+                unsafe { libc::WEXITSTATUS(status) }
+            } else if unsafe { libc::WIFSIGNALED(status) } {
+                128 + unsafe { libc::WTERMSIG(status) }
+            } else {
+                1
+            };
+        } else if wpid < 0 {
+            break;
+        }
+    }
+    exit_code
+}
+
 fn spawn_user_notif_worker(
     parent_sock_raw: RawFd,
     blocked: &std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>,
