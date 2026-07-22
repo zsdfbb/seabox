@@ -35,7 +35,6 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::linux::LinuxSandbox;
 use sandbox_runtime::{CommandSpec, LandlockPerm, LandlockRule, Sandbox};
 
 /// 检查运行中的内核是否支持 Landlock。
@@ -43,11 +42,9 @@ fn is_landlock_available() -> bool {
     sandbox_runtime::linux::landlock::is_available()
 }
 
-/// 辅助函数：创建一个默认配置的 LinuxSandbox。
-fn make_sandbox() -> LinuxSandbox {
-    LinuxSandbox {
-        config: SandboxConfig::default(),
-    }
+/// 辅助函数：创建一个默认配置的 Sandbox。
+fn make_sandbox() -> Sandbox {
+    Sandbox::from_config(SandboxConfig::default()).expect("create sandbox")
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +222,7 @@ fn workspace_write_allows_write() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should succeed under WorkspaceWrite");
 
@@ -263,7 +260,7 @@ fn full_access_bypasses_landlock() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should succeed under FullAccess");
 
@@ -309,7 +306,7 @@ fn read_only_blocks_write() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should not fail, though the child process may error");
 
@@ -492,15 +489,13 @@ fn cli_check_reports_landlock_available() {
 //
 // 所有会真的写入主机的测试都走预检 + PID 化路径 + best-effort 清理。
 
-/// 用指定策略 + allow_write 列表构造 LinuxSandbox，用于库 API 测试。
-fn make_sandbox_with_landlock(rules: Vec<LandlockRule>) -> LinuxSandbox {
-    use sandbox_runtime::config::FilesystemConfig;
-    LinuxSandbox {
-        config: SandboxConfig {
-            filesystem: FilesystemConfig { landlock: rules },
-            ..Default::default()
-        },
-    }
+/// 用指定策略 + allow_write 列表构造 Sandbox，用于库 API 测试。
+fn make_sandbox_with_landlock(rules: Vec<LandlockRule>) -> Sandbox {
+    Sandbox::from_config(SandboxConfig {
+        landlock: rules,
+        ..Default::default()
+    })
+    .expect("create sandbox")
 }
 
 // ===== 库 API 测试：覆盖每条限制能力 =====
@@ -523,7 +518,7 @@ fn read_only_allows_read() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should succeed under ReadOnly");
 
@@ -556,7 +551,7 @@ fn workspace_write_allows_write_to_tmp() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should succeed under WorkspaceWrite");
 
@@ -587,7 +582,7 @@ fn workspace_write_allows_read_anywhere() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should succeed under WorkspaceWrite");
 
@@ -649,7 +644,7 @@ fn workspace_write_grants_allow_write_path() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should succeed under WorkspaceWrite with allow_write");
 
@@ -716,7 +711,7 @@ fn workspace_write_does_not_grant_unlisted_path() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should not fail; child may error");
 
@@ -753,7 +748,7 @@ fn full_access_does_not_intercept_writes() {
         timeout: Duration::from_secs(10),
     };
 
-    let output = sandbox
+    let (output, _reason) = sandbox
         .execute(&spec)
         .expect("execute should succeed under FullAccess");
 

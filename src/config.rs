@@ -1,31 +1,11 @@
-//! 沙箱配置解析与 Builder。
+//! 沙箱配置。
 //!
-//! 提供 [`SandboxConfig`]（可从 TOML 反序列化）、[`SandboxConfigBuilder`]，
-//! 以及用于路径展开的 [`expand_tilde`] 工具函数。
-//!
-//! ## TOML 示例
-//!
-//! ```toml
-//! [filesystem]
-//! policy = "workspace"
-//! allow_write = [".", "/tmp"]
-//!
-//! [network]
-//! enabled = false
-//!
-//! [timeout]
-//! default_secs = 30
-//! max_secs = 300
-//! ```
+//! 提供 [`SandboxConfig`]（可编程构造，支持链式 `with_*` 方法）、
+//! [`NamespacesConfig`]（namespace 隔离设置），
+//! 以及用于路径展开的 [`expand_tilde`]、权限展开的 [`expand_perm`]、
+//! landlock 规格解析的 [`parse_landlock_spec`] 等工具函数。
 
-use std::path::Path;
-
-use serde::{Deserialize, Serialize};
-
-use crate::LandlockRule;
-
-#[cfg(test)]
-use crate::LandlockPerm;
+use crate::{LandlockPerm, LandlockRule};
 
 // ---------------------------------------------------------------------------
 // SandboxConfig
@@ -33,170 +13,118 @@ use crate::LandlockPerm;
 
 /// 完整的沙箱配置。
 ///
-/// 可从 TOML 反序列化。可直接构造、通过 [`SandboxConfig::from_toml`] 加载，
-/// 或通过 [`SandboxConfig::builder`] 流式 API 构造。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// 可直接构造、通过 `Default::default()` 创建，或通过 `with_*` 链式方法配置。
+#[derive(Debug, Clone)]
 pub struct SandboxConfig {
-    #[serde(default)]
-    pub filesystem: FilesystemConfig,
-    #[serde(default)]
-    pub network: NetworkConfig,
-    #[serde(default)]
+    pub landlock: Vec<LandlockRule>,
     pub namespaces: NamespacesConfig,
-    #[serde(default)]
-    pub timeout: TimeoutConfig,
+    pub network_enabled: bool,
+    pub timeout_default_secs: u64,
+    pub timeout_max_secs: u64,
 }
 
-impl SandboxConfig {
-    /// 从磁盘上的 TOML 文件加载一个 [`SandboxConfig`]。
-    pub fn from_toml(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path.as_ref())?;
-        let config: SandboxConfig = toml::from_str(&content)?;
-        Ok(config)
-    }
-
-    /// 创建一个用于程序化构造的 [`SandboxConfigBuilder`]。
-    pub fn builder() -> SandboxConfigBuilder {
-        SandboxConfigBuilder::default()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SandboxConfigBuilder
-// ---------------------------------------------------------------------------
-
-/// 用于 [`SandboxConfig`] 的流式 Builder。
-///
-/// # 示例
-///
-/// ```ignore
-/// use sandbox_runtime::config::SandboxConfig;
-/// use sandbox_runtime::LandlockRule;
-///
-/// let config = SandboxConfig::builder()
-///     .landlock(vec![LandlockRule { path: "/tmp".into(), perms: vec![] }])
-///     .network_enabled(false)
-///     .timeout(60, 600)
-///     .build();
-/// ```
-#[derive(Debug)]
-pub struct SandboxConfigBuilder {
-    landlock: Vec<LandlockRule>,
-    network_enabled: bool,
-    namespaces: NamespacesConfig,
-    timeout_default_secs: u64,
-    timeout_max_secs: u64,
-}
-
-impl Default for SandboxConfigBuilder {
+impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            landlock: Vec::new(),
-            network_enabled: false,
+            landlock: vec![],
             namespaces: NamespacesConfig::default(),
+            network_enabled: false,
             timeout_default_secs: 30,
             timeout_max_secs: 300,
         }
     }
 }
 
-impl SandboxConfigBuilder {
-    /// 设置 Landlock 规则。
-    pub fn landlock(mut self, rules: Vec<LandlockRule>) -> Self {
-        self.landlock = rules;
+impl SandboxConfig {
+    /// 追加一条 landlock 规则（等价于 `--landlock path:perm`）。
+    pub fn with_landlock(mut self, spec: &str) -> anyhow::Result<Self> {
+        self.landlock
+            .push(crate::config::parse_landlock_spec(spec)?);
+        Ok(self)
+    }
+
+    /// 启用 user 命名空间隔离。
+    pub fn with_unshare_user(mut self) -> Self {
+        self.namespaces.user = true;
         self
     }
 
-    /// 启用或禁用网络访问（Phase 1：仅占位）。
-    pub fn network_enabled(mut self, enabled: bool) -> Self {
-        self.network_enabled = enabled;
+    /// 启用 IPC 命名空间隔离。
+    pub fn with_unshare_ipc(mut self) -> Self {
+        self.namespaces.ipc = true;
         self
     }
 
-    /// 直接设置 NamespacesConfig。
-    pub fn namespaces(mut self, ns: NamespacesConfig) -> Self {
-        self.namespaces = ns;
+    /// 启用 PID 命名空间隔离。
+    pub fn with_unshare_pid(mut self) -> Self {
+        self.namespaces.pid = true;
+        self
+    }
+
+    /// 启用网络命名空间隔离。
+    pub fn with_unshare_net(mut self) -> Self {
+        self.namespaces.net = true;
+        self
+    }
+
+    /// 启用 UTS 命名空间隔离。
+    pub fn with_unshare_uts(mut self) -> Self {
+        self.namespaces.uts = true;
+        self
+    }
+
+    /// 启用 cgroup 命名空间隔离。
+    pub fn with_unshare_cgroup(mut self) -> Self {
+        self.namespaces.cgroup = true;
         self
     }
 
     /// 启用全部命名空间隔离（user/ipc/pid/net/uts/cgroup）。
-    ///
-    /// 不包括 `user_try` 和 `cgroup_try` 变体。
-    pub fn unshare_all(mut self) -> Self {
-        self.namespaces = NamespacesConfig {
-            user: true,
-            ipc: true,
-            pid: true,
-            net: true,
-            uts: true,
-            cgroup: true,
-            ..self.namespaces
-        };
+    pub fn with_unshare_all(mut self) -> Self {
+        self.namespaces.user = true;
+        self.namespaces.ipc = true;
+        self.namespaces.pid = true;
+        self.namespaces.net = true;
+        self.namespaces.uts = true;
+        self.namespaces.cgroup = true;
+        self
+    }
+
+    /// 在 user 命名空间中映射 uid。
+    pub fn with_uid(mut self, uid: u32) -> Self {
+        self.namespaces.uid = Some(uid);
+        self
+    }
+
+    /// 在 user 命名空间中映射 gid。
+    pub fn with_gid(mut self, gid: u32) -> Self {
+        self.namespaces.gid = Some(gid);
+        self
+    }
+
+    /// 在 UTS 命名空间中设置 hostname。
+    pub fn with_hostname(mut self, name: impl Into<String>) -> Self {
+        self.namespaces.hostname = Some(name.into());
+        self
+    }
+
+    /// 启用或禁用网络访问。
+    pub fn with_network(mut self, enabled: bool) -> Self {
+        self.network_enabled = enabled;
         self
     }
 
     /// 同时设置默认与最大超时（秒）。
-    ///
-    /// `default_secs` 是调用方未指定时使用的超时；`max_secs` 是沙箱接受
-    /// 的硬性上限。
-    pub fn timeout(mut self, default_secs: u64, max_secs: u64) -> Self {
+    pub fn with_timeout(mut self, default_secs: u64, max_secs: u64) -> Self {
         self.timeout_default_secs = default_secs;
         self.timeout_max_secs = max_secs;
         self
     }
 
-    /// 消费 Builder 并产出一个 [`SandboxConfig`]。
-    pub fn build(self) -> SandboxConfig {
-        SandboxConfig {
-            filesystem: FilesystemConfig {
-                landlock: self.landlock,
-            },
-            network: NetworkConfig {
-                enabled: self.network_enabled,
-            },
-            namespaces: self.namespaces,
-            timeout: TimeoutConfig {
-                default_secs: self.timeout_default_secs,
-                max_secs: self.timeout_max_secs,
-            },
-        }
+    /// 创建沙箱实例（返回 [`crate::Sandbox`]）。
+    pub fn into_sandbox(self) -> anyhow::Result<crate::Sandbox> {
+        crate::Sandbox::from_config(self)
     }
-}
-
-// ---------------------------------------------------------------------------
-// FilesystemConfig
-// ---------------------------------------------------------------------------
-
-/// 沙箱的文件系统访问配置。
-///
-/// `landlock` 字段指定 Landlock 路径权限规则。
-/// 空列表表示不激活 Landlock。
-///
-/// # TOML
-///
-/// ```toml
-/// [filesystem]
-/// landlock = [{ path = "/", perms = ["ro"] }]
-/// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct FilesystemConfig {
-    /// Landlock 路径权限规则。
-    #[serde(default)]
-    pub landlock: Vec<LandlockRule>,
-}
-
-// ---------------------------------------------------------------------------
-// NetworkConfig
-// ---------------------------------------------------------------------------
-
-/// 网络访问配置。
-///
-/// Phase 1：这是占位实现。网络沙箱化尚未实现。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NetworkConfig {
-    /// 是否启用网络访问。
-    #[serde(default)]
-    pub enabled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,73 +135,30 @@ pub struct NetworkConfig {
 ///
 /// 控制哪些命名空间被 unshare(2) 隔离。
 /// `user_try` / `cgroup_try` 是软性选项：若内核不支持则静默回退，不报错。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct NamespacesConfig {
     /// 隔离 user 命名空间（需要 `CAP_SETUID`、`CAP_SETGID`）。
-    #[serde(default)]
     pub user: bool,
     /// 隔离 IPC 命名空间。
-    #[serde(default)]
     pub ipc: bool,
     /// 隔离 PID 命名空间。
-    #[serde(default)]
     pub pid: bool,
     /// 隔离网络命名空间。
-    #[serde(default)]
     pub net: bool,
     /// 隔离 UTS（hostname）命名空间。
-    #[serde(default)]
     pub uts: bool,
     /// 隔离 cgroup 命名空间。
-    #[serde(default)]
     pub cgroup: bool,
     /// 软性 user 命名空间（内核不支持时静默回退）。
-    #[serde(default)]
     pub user_try: bool,
     /// 软性 cgroup 命名空间（内核不支持时静默回退）。
-    #[serde(default)]
     pub cgroup_try: bool,
     /// 在 user 命名空间中映射的 uid（仅在 `user` 或 `user_try` 生效时使用）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
     /// 在 user 命名空间中映射的 gid（仅在 `user` 或 `user_try` 生效时使用）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gid: Option<u32>,
     /// 在 UTS 命名空间中设置的 hostname（仅在 `uts` 生效时使用）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// TimeoutConfig
-// ---------------------------------------------------------------------------
-
-/// 沙箱化命令的超时配置。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimeoutConfig {
-    /// 默认命令超时（秒）。
-    #[serde(default = "default_timeout")]
-    pub default_secs: u64,
-    /// 允许的最大命令超时（秒）。
-    #[serde(default = "default_max_timeout")]
-    pub max_secs: u64,
-}
-
-impl Default for TimeoutConfig {
-    fn default() -> Self {
-        Self {
-            default_secs: default_timeout(),
-            max_secs: default_max_timeout(),
-        }
-    }
-}
-
-fn default_timeout() -> u64 {
-    30
-}
-
-fn default_max_timeout() -> u64 {
-    300
 }
 
 // ---------------------------------------------------------------------------
@@ -306,22 +191,87 @@ pub fn expand_tilde(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 测试
+// 权限展开
 // ---------------------------------------------------------------------------
+
+/// 将权限字符串展开为个体权限列表。
+///
+/// 预设组合（`ro`/`rx`、`rw`、`rwx`、`all`）会被展开为对应的个体权限；
+/// 个体权限名直接解析为 [`LandlockPerm`] 单元素向量。
+pub fn expand_perm(s: &str) -> Vec<LandlockPerm> {
+    match s {
+        "ro" | "rx" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ],
+        "rw" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+        ],
+        "rwx" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+            LandlockPerm::MakeSock,
+            LandlockPerm::MakeFifo,
+            LandlockPerm::MakeBlock,
+            LandlockPerm::MakeChar,
+        ],
+        "all" => vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+            LandlockPerm::WriteFile,
+            LandlockPerm::RemoveDir,
+            LandlockPerm::RemoveFile,
+            LandlockPerm::MakeDir,
+            LandlockPerm::MakeReg,
+            LandlockPerm::MakeSym,
+            LandlockPerm::Truncate,
+            LandlockPerm::MakeSock,
+            LandlockPerm::MakeFifo,
+            LandlockPerm::MakeBlock,
+            LandlockPerm::MakeChar,
+            LandlockPerm::Refer,
+            LandlockPerm::IoctlDev,
+        ],
+        other => vec![other.parse::<LandlockPerm>().unwrap()],
+    }
+}
+
+/// 解析 `path:perm1[,perm2...]` 格式为一条 [`LandlockRule`]。
+///
+/// 等价于 CLI 的 `--landlock /:ro` 语法。
+pub fn parse_landlock_spec(s: &str) -> anyhow::Result<LandlockRule> {
+    let (path, perms_str) = s.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("invalid landlock spec '{s}'; expected format: path:perm1[,perm2...]")
+    })?;
+    let perms = perms_str.split(',').flat_map(expand_perm).collect();
+    Ok(LandlockRule {
+        path: path.into(),
+        perms,
+    })
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_default_config() {
-        let config = SandboxConfig::default();
-        assert!(config.filesystem.landlock.is_empty());
-        assert!(!config.network.enabled);
-        assert_eq!(config.timeout.default_secs, 30);
-        assert_eq!(config.timeout.max_secs, 300);
-    }
 
     #[test]
     fn test_expand_tilde() {
@@ -340,240 +290,25 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_default() {
-        let config = SandboxConfig::builder().build();
-        assert!(config.filesystem.landlock.is_empty());
-        assert!(!config.network.enabled);
-        assert_eq!(config.timeout.default_secs, 30);
-        assert_eq!(config.timeout.max_secs, 300);
+    fn test_expand_perm_ro() {
+        let perms = expand_perm("ro");
+        assert_eq!(perms.len(), 3);
+        assert!(perms.contains(&LandlockPerm::Execute));
+        assert!(perms.contains(&LandlockPerm::ReadFile));
+        assert!(perms.contains(&LandlockPerm::ReadDir));
     }
 
     #[test]
-    fn test_builder_roundtrip() {
-        let ro_perms = vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-        ];
-        let rw_perms = vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-            LandlockPerm::WriteFile,
-            LandlockPerm::RemoveDir,
-            LandlockPerm::RemoveFile,
-            LandlockPerm::MakeDir,
-            LandlockPerm::MakeReg,
-            LandlockPerm::MakeSym,
-            LandlockPerm::Truncate,
-        ];
-        let config = SandboxConfig::builder()
-            .landlock(vec![
-                LandlockRule {
-                    path: "/".into(),
-                    perms: ro_perms.clone(),
-                },
-                LandlockRule {
-                    path: "/tmp".into(),
-                    perms: rw_perms.clone(),
-                },
-                LandlockRule {
-                    path: "./output".into(),
-                    perms: rw_perms,
-                },
-            ])
-            .network_enabled(true)
-            .timeout(60, 600)
-            .build();
-
-        assert_eq!(config.filesystem.landlock.len(), 3);
-        assert_eq!(config.filesystem.landlock[0].path, PathBuf::from("/"));
-        assert_eq!(config.filesystem.landlock[0].perms, ro_perms);
-        assert!(config.network.enabled);
-        assert_eq!(config.timeout.default_secs, 60);
-        assert_eq!(config.timeout.max_secs, 600);
+    fn test_expand_perm_all() {
+        let perms = expand_perm("all");
+        assert!(perms.contains(&LandlockPerm::Refer));
+        assert!(perms.contains(&LandlockPerm::IoctlDev));
+        assert!(perms.contains(&LandlockPerm::MakeSock));
+        assert!(perms.contains(&LandlockPerm::WriteFile));
     }
 
     #[test]
-    fn test_filesystem_default() {
-        let fs = FilesystemConfig::default();
-        assert!(fs.landlock.is_empty());
-    }
-
-    #[test]
-    fn test_network_default() {
-        let net = NetworkConfig::default();
-        assert!(!net.enabled);
-    }
-
-    #[test]
-    fn test_timeout_default() {
-        let t = TimeoutConfig::default();
-        assert_eq!(t.default_secs, 30);
-        assert_eq!(t.max_secs, 300);
-    }
-
-    #[test]
-    fn test_from_toml_nonexistent() {
-        let err = SandboxConfig::from_toml("/nonexistent/path.toml").unwrap_err();
-        assert!(
-            err.to_string().contains("No such file") || err.to_string().contains("file not found")
-        );
-    }
-
-    #[test]
-    fn test_toml_roundtrip() {
-        let ro_perms = vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-        ];
-        let rw_perms = vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-            LandlockPerm::WriteFile,
-            LandlockPerm::RemoveDir,
-            LandlockPerm::RemoveFile,
-            LandlockPerm::MakeDir,
-            LandlockPerm::MakeReg,
-            LandlockPerm::MakeSym,
-            LandlockPerm::Truncate,
-        ];
-        let config = SandboxConfig {
-            filesystem: FilesystemConfig {
-                landlock: vec![
-                    LandlockRule {
-                        path: "/".into(),
-                        perms: ro_perms.clone(),
-                    },
-                    LandlockRule {
-                        path: "/data".into(),
-                        perms: rw_perms.clone(),
-                    },
-                ],
-            },
-            network: NetworkConfig { enabled: false },
-            namespaces: NamespacesConfig::default(),
-            timeout: TimeoutConfig {
-                default_secs: 60,
-                max_secs: 600,
-            },
-        };
-
-        let toml_str = toml::to_string(&config).expect("serialisation should succeed");
-        let deserialised: SandboxConfig =
-            toml::from_str(&toml_str).expect("deserialisation should succeed");
-
-        assert_eq!(deserialised.filesystem.landlock.len(), 2);
-        assert_eq!(deserialised.filesystem.landlock[0].perms, ro_perms);
-        assert_eq!(deserialised.filesystem.landlock[1].perms, rw_perms);
-        assert!(!deserialised.network.enabled);
-        assert_eq!(deserialised.timeout.default_secs, 60);
-        assert_eq!(deserialised.timeout.max_secs, 600);
-    }
-
-    #[test]
-    fn test_toml_deserialize_landlock() {
-        let ro_perms = vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-        ];
-        let rw_perms = vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-            LandlockPerm::WriteFile,
-            LandlockPerm::RemoveDir,
-            LandlockPerm::RemoveFile,
-            LandlockPerm::MakeDir,
-            LandlockPerm::MakeReg,
-            LandlockPerm::MakeSym,
-            LandlockPerm::Truncate,
-        ];
-        let toml_str = r#"
-[filesystem]
-landlock = [
-  { path = "/", perms = ["execute", "read-file", "read-dir"] },
-  { path = "/tmp", perms = ["execute", "read-file", "read-dir", "write-file", "remove-dir", "remove-file", "make-dir", "make-reg", "make-sym", "truncate"] },
-]
-
-[network]
-enabled = true
-
-[timeout]
-default_secs = 10
-max_secs = 120
-"#;
-        let config: SandboxConfig = toml::from_str(toml_str).expect("TOML should parse");
-        assert_eq!(config.filesystem.landlock.len(), 2);
-        assert_eq!(config.filesystem.landlock[0].perms, ro_perms);
-        assert_eq!(config.filesystem.landlock[1].perms, rw_perms);
-        assert!(config.network.enabled);
-        assert_eq!(config.timeout.default_secs, 10);
-        assert_eq!(config.timeout.max_secs, 120);
-    }
-
-    #[test]
-    fn test_toml_empty_landlock() {
-        let toml_str = r#"
-[filesystem]
-landlock = []
-"#;
-        let config: SandboxConfig = toml::from_str(toml_str).expect("TOML should parse");
-        assert!(config.filesystem.landlock.is_empty());
-    }
-
-    #[test]
-    fn test_toml_invalid_landlock_perm() {
-        let toml_str = r#"
-[filesystem]
-landlock = [{ path = "/", perms = ["invalid-perm"] }]
-"#;
-        let result: Result<SandboxConfig, _> = toml::from_str(toml_str);
-        assert!(
-            result.is_err(),
-            "invalid landlock perm should fail to deserialise"
-        );
-    }
-
-    #[test]
-    fn test_tilde_in_builder_paths() {
-        // Builder 原样存储路径；展开是运行时的职责。
-        let config = SandboxConfig::builder()
-            .landlock(vec![LandlockRule {
-                path: "~/workspace".into(),
-                perms: vec![
-                    LandlockPerm::Execute,
-                    LandlockPerm::ReadFile,
-                    LandlockPerm::ReadDir,
-                    LandlockPerm::WriteFile,
-                    LandlockPerm::RemoveDir,
-                    LandlockPerm::RemoveFile,
-                    LandlockPerm::MakeDir,
-                    LandlockPerm::MakeReg,
-                    LandlockPerm::MakeSym,
-                    LandlockPerm::Truncate,
-                ],
-            }])
-            .build();
-        assert_eq!(
-            config.filesystem.landlock[0].path,
-            PathBuf::from("~/workspace")
-        );
-        // 运行时调用 expand_tilde
-        let expanded = expand_tilde(config.filesystem.landlock[0].path.to_str().unwrap());
-        assert!(!expanded.starts_with("~/"));
-        assert!(expanded.ends_with("/workspace"));
-    }
-
-    // -----------------------------------------------------------------------
-    // NamespacesConfig 测试
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_namespaces_default_values() {
+    fn test_namespaces_default() {
         let ns = NamespacesConfig::default();
         assert!(!ns.user);
         assert!(!ns.ipc);
@@ -589,134 +324,38 @@ landlock = [{ path = "/", perms = ["invalid-perm"] }]
     }
 
     #[test]
-    fn test_namespaces_builder_unshare_all() {
-        let config = SandboxConfig::builder().unshare_all().build();
+    fn test_with_landlock() {
+        let config = SandboxConfig::default()
+            .with_landlock("/:ro")
+            .expect("valid spec");
+        assert_eq!(config.landlock.len(), 1);
+        assert_eq!(config.landlock[0].path.as_os_str(), "/");
+    }
+
+    #[test]
+    fn test_with_unshare_all() {
+        let config = SandboxConfig::default().with_unshare_all();
         assert!(config.namespaces.user);
         assert!(config.namespaces.ipc);
         assert!(config.namespaces.pid);
         assert!(config.namespaces.net);
         assert!(config.namespaces.uts);
         assert!(config.namespaces.cgroup);
-        // unshare_all 不影响 try 变体
-        assert!(!config.namespaces.user_try);
-        assert!(!config.namespaces.cgroup_try);
     }
 
     #[test]
-    fn test_namespaces_serialize_deserialize() {
-        let ns = NamespacesConfig {
-            user: true,
-            ipc: true,
-            pid: false,
-            net: true,
-            uts: false,
-            cgroup: false,
-            user_try: false,
-            cgroup_try: true,
-            uid: Some(1000),
-            gid: Some(100),
-            hostname: Some("sandbox".into()),
-        };
-        let toml_str = toml::to_string(&ns).expect("serialisation should succeed");
-        let deserialised: NamespacesConfig =
-            toml::from_str(&toml_str).expect("deserialisation should succeed");
-
-        assert!(deserialised.user);
-        assert!(deserialised.ipc);
-        assert!(!deserialised.pid);
-        assert!(deserialised.net);
-        assert!(!deserialised.uts);
-        assert!(!deserialised.cgroup);
-        assert!(!deserialised.user_try);
-        assert!(deserialised.cgroup_try);
-        assert_eq!(deserialised.uid, Some(1000));
-        assert_eq!(deserialised.gid, Some(100));
-        assert_eq!(deserialised.hostname, Some("sandbox".into()));
-    }
-
-    #[test]
-    fn test_namespaces_toml_parse() {
-        let toml_str = r#"
-user = true
-pid = true
-net = true
-uts = true
-uid = 1000
-hostname = "sandbox-vm"
-"#;
-        let ns: NamespacesConfig = toml::from_str(toml_str).expect("TOML should parse");
-        assert!(ns.user);
-        assert!(!ns.ipc);
-        assert!(ns.pid);
-        assert!(ns.net);
-        assert!(ns.uts);
-        assert!(!ns.cgroup);
-        assert!(!ns.user_try);
-        assert!(!ns.cgroup_try);
-        assert_eq!(ns.uid, Some(1000));
-        assert!(ns.gid.is_none());
-        assert_eq!(ns.hostname, Some("sandbox-vm".into()));
-    }
-
-    #[test]
-    fn test_namespaces_toml_parse_sandboxconfig() {
-        let toml_str = r#"
-[filesystem]
-landlock = [{ path = "/", perms = ["execute", "read-file", "read-dir"] }]
-
-[network]
-enabled = false
-
-[namespaces]
-user = true
-pid = true
-net = true
-uts = true
-uid = 1000
-hostname = "sandbox-vm"
-
-[timeout]
-default_secs = 30
-max_secs = 300
-"#;
-        let config: SandboxConfig = toml::from_str(toml_str).expect("TOML should parse");
-        assert!(config.namespaces.user);
-        assert!(!config.namespaces.ipc);
-        assert!(config.namespaces.pid);
-        assert!(config.namespaces.net);
-        assert!(config.namespaces.uts);
-        assert!(!config.namespaces.cgroup);
+    fn test_with_uid_gid() {
+        let config = SandboxConfig::default().with_uid(1000).with_gid(100);
         assert_eq!(config.namespaces.uid, Some(1000));
-        assert_eq!(config.namespaces.hostname, Some("sandbox-vm".into()));
-        assert_eq!(config.network.enabled, false);
-        assert_eq!(config.timeout.default_secs, 30);
+        assert_eq!(config.namespaces.gid, Some(100));
     }
 
     #[test]
-    fn test_sandboxconfig_with_namespaces() {
-        let config = SandboxConfig {
-            filesystem: FilesystemConfig { landlock: vec![] },
-            network: NetworkConfig { enabled: false },
-            namespaces: NamespacesConfig {
-                user: true,
-                pid: true,
-                net: true,
-                ..NamespacesConfig::default()
-            },
-            timeout: TimeoutConfig {
-                default_secs: 30,
-                max_secs: 300,
-            },
-        };
-        let toml_str = toml::to_string(&config).expect("serialisation should succeed");
-        let deserialised: SandboxConfig =
-            toml::from_str(&toml_str).expect("deserialisation should succeed");
-
-        assert!(deserialised.namespaces.user);
-        assert!(deserialised.namespaces.pid);
-        assert!(deserialised.namespaces.net);
-        assert!(!deserialised.namespaces.ipc);
-        assert!(!deserialised.namespaces.uts);
-        assert!(!deserialised.namespaces.cgroup);
+    fn test_sandbox_config_default() {
+        let config = SandboxConfig::default();
+        assert!(config.landlock.is_empty());
+        assert!(!config.network_enabled);
+        assert_eq!(config.timeout_default_secs, 30);
+        assert_eq!(config.timeout_max_secs, 300);
     }
 }

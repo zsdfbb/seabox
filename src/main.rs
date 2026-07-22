@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use sandbox_runtime::config::{NamespacesConfig, SandboxConfig};
-use sandbox_runtime::{CommandSpec, ExitReason, LandlockPerm, LandlockRule};
+use sandbox_runtime::config::{parse_landlock_spec, NamespacesConfig, SandboxConfig};
+use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
 
 // ---------------------------------------------------------------------------
 // CLI 定义
@@ -207,8 +207,8 @@ fn cmd_run(
         hostname,
     )?;
 
-    let timeout = Duration::from_secs(config.timeout.default_secs);
-    let sandbox = sandbox_runtime::create_sandbox(config)?;
+    let timeout = Duration::from_secs(config.timeout_default_secs);
+    let sandbox = Sandbox::from_config(config)?;
 
     let program = command[0].clone();
     let args = command[1..].to_vec();
@@ -234,9 +234,7 @@ fn cmd_run(
         timeout,
     };
 
-    let output = sandbox.execute(&spec)?;
-
-    let reason = sandbox.classify_exit(output.exit_code, output.blocked_syscall);
+    let (_output, reason) = sandbox.execute(&spec)?;
 
     match reason {
         ExitReason::Ok => std::process::exit(0),
@@ -303,14 +301,13 @@ fn build_config(
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     // --unshare-pid 在非 root 下需要 user ns 来获取 CAP_SYS_ADMIN
-    let pid_without_user = (unshare_pid || unshare_all) && !unshare_user && !unshare_all;
+    let pid_without_user = unshare_pid && !unshare_all && !unshare_user;
     let need_user_for_pid = pid_without_user && unsafe { libc::geteuid() } != 0;
     let effective_user = unshare_user || unshare_all || need_user_for_pid;
 
-    Ok(SandboxConfig::builder()
-        .landlock(rules)
-        .network_enabled(allow_network)
-        .namespaces(NamespacesConfig {
+    Ok(SandboxConfig {
+        landlock: rules,
+        namespaces: NamespacesConfig {
             user: effective_user,
             ipc: unshare_ipc || unshare_all,
             pid: unshare_pid || unshare_all,
@@ -322,79 +319,9 @@ fn build_config(
             uid,
             gid,
             hostname,
-        })
-        .build())
-}
-
-/// 解析 --landlock 参数：path:perm1[,perm2...]
-fn parse_landlock_spec(s: &str) -> anyhow::Result<LandlockRule> {
-    let (path, perms_str) = s.split_once(':').ok_or_else(|| {
-        anyhow::anyhow!("invalid --landlock spec '{s}'; expected format: path:perm1[,perm2...]")
-    })?;
-    let perms = perms_str.split(',').flat_map(expand_perm).collect();
-    Ok(LandlockRule {
-        path: path.into(),
-        perms,
+        },
+        network_enabled: allow_network,
+        timeout_default_secs: 30,
+        timeout_max_secs: 300,
     })
-}
-
-/// 将权限字符串展开为个体权限列表。
-///
-/// 预设组合（`ro`/`rx`、`rw`、`rwx`、`all`）会被展开为对应的个体权限；
-/// 个体权限名直接解析为 [`LandlockPerm`] 单元素向量。
-fn expand_perm(s: &str) -> Vec<LandlockPerm> {
-    match s {
-        "ro" | "rx" => vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-        ],
-        "rw" => vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-            LandlockPerm::WriteFile,
-            LandlockPerm::RemoveDir,
-            LandlockPerm::RemoveFile,
-            LandlockPerm::MakeDir,
-            LandlockPerm::MakeReg,
-            LandlockPerm::MakeSym,
-            LandlockPerm::Truncate,
-        ],
-        "rwx" => vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-            LandlockPerm::WriteFile,
-            LandlockPerm::RemoveDir,
-            LandlockPerm::RemoveFile,
-            LandlockPerm::MakeDir,
-            LandlockPerm::MakeReg,
-            LandlockPerm::MakeSym,
-            LandlockPerm::Truncate,
-            LandlockPerm::MakeSock,
-            LandlockPerm::MakeFifo,
-            LandlockPerm::MakeBlock,
-            LandlockPerm::MakeChar,
-        ],
-        "all" => vec![
-            LandlockPerm::Execute,
-            LandlockPerm::ReadFile,
-            LandlockPerm::ReadDir,
-            LandlockPerm::WriteFile,
-            LandlockPerm::RemoveDir,
-            LandlockPerm::RemoveFile,
-            LandlockPerm::MakeDir,
-            LandlockPerm::MakeReg,
-            LandlockPerm::MakeSym,
-            LandlockPerm::Truncate,
-            LandlockPerm::MakeSock,
-            LandlockPerm::MakeFifo,
-            LandlockPerm::MakeBlock,
-            LandlockPerm::MakeChar,
-            LandlockPerm::Refer,
-            LandlockPerm::IoctlDev,
-        ],
-        other => vec![other.parse::<LandlockPerm>().unwrap()],
-    }
 }

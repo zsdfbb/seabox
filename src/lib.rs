@@ -1,15 +1,14 @@
 //! sandbox-runtime 的核心类型与 trait。
 //!
 //! 本模块定义平台无关的抽象：
-//! - [`Sandbox`] trait（沙箱后端的主要抽象）
+//! - [`SandboxImpl`] trait（沙箱后端的主要抽象，非 pub）
+//! - [`Sandbox`] struct（公开的沙箱包装器）
 //! - [`LandlockPerm`]、[`LandlockRule`]、[`DenyMechanism`]、[`ExitReason`]
 //! - 命令规格：[`CommandSpec`]、[`CommandOutput`]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
-
-use serde::{Deserialize, Serialize};
 
 pub mod config;
 
@@ -24,8 +23,7 @@ pub mod linux;
 ///
 /// 预设组合（如 `ro`、`rw`、`rwx`、`all`）在 CLI 层通过
 /// [`expand_perm`](crate::config::expand_perm) 展开，不在此枚举中。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LandlockPerm {
     Execute,
     ReadFile,
@@ -71,7 +69,7 @@ impl std::str::FromStr for LandlockPerm {
 }
 
 /// 一条 Landlock 规则：路径 + 权限列表。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LandlockRule {
     pub path: PathBuf,
     pub perms: Vec<LandlockPerm>,
@@ -158,13 +156,11 @@ impl ExitReason {
 // 平台工厂
 // ---------------------------------------------------------------------------
 
-/// 创建当前平台对应的沙箱实例。
-///
-/// Linux:   [`LinuxSandbox`]（Landlock + seccomp + namespace）
-/// macOS:   暂不支持，返回错误
-pub fn create_sandbox(config: config::SandboxConfig) -> anyhow::Result<Box<dyn Sandbox>> {
+fn create_sandbox_impl(config: config::SandboxConfig) -> anyhow::Result<Box<dyn SandboxImpl>> {
     #[cfg(target_os = "linux")]
-    { return Ok(Box::new(linux::LinuxSandbox { config })); }
+    {
+        Ok(Box::new(linux::LinuxSandbox { config }))
+    }
 
     #[cfg(not(target_os = "linux"))]
     {
@@ -291,14 +287,14 @@ pub struct CommandOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox trait
+// SandboxImpl trait（内部，非 pub）
 // ---------------------------------------------------------------------------
 
-/// 与平台无关的沙箱抽象。
+/// 与平台无关的沙箱抽象（内部 trait）。
 ///
 /// 各实现使用目标平台上可用的内核机制来提供文件系统隔离与系统调用过滤
 ///（例如 Linux 上的 Landlock + seccomp、macOS 上的 Seatbelt）。
-pub trait Sandbox: Send + Sync {
+trait SandboxImpl: Send + Sync {
     /// 在沙箱限制下执行命令，并返回其输出。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput>;
 
@@ -308,4 +304,50 @@ pub trait Sandbox: Send + Sync {
     /// `blocked` 仅在 seccomp 命中黑名单（子进程被 SIGSYS 杀死）时有值，
     /// 由实现从 `/proc/<pid>/syscall` post-mortem 读取。
     fn classify_exit(&self, exit_code: i32, blocked: Option<(u32, u32)>) -> ExitReason;
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox struct（公开 API）
+// ---------------------------------------------------------------------------
+
+/// 公开的沙箱包装器。
+///
+/// 持有配置与内部实现，提供 `execute` 方法返回 `(CommandOutput, ExitReason)`。
+pub struct Sandbox {
+    pub config: config::SandboxConfig,
+    inner: Box<dyn SandboxImpl>,
+}
+
+impl Sandbox {
+    /// 从已有配置创建沙箱。
+    ///
+    /// 自动处理 PID ns 与 user ns 的依赖关系：
+    /// 非 root 下 `pid` 隐式启用 `user` 命名空间。
+    pub fn from_config(config: config::SandboxConfig) -> anyhow::Result<Self> {
+        let ns = &config.namespaces;
+        let effective_user = ns.pid && !ns.user && unsafe { libc::geteuid() } != 0;
+        let config = if effective_user {
+            let mut c = config;
+            c.namespaces.user = true;
+            c
+        } else {
+            config
+        };
+        let inner = create_sandbox_impl(config.clone())?;
+        Ok(Self { config, inner })
+    }
+
+    /// 执行命令，返回 `(CommandOutput, ExitReason)`。
+    pub fn execute(&self, spec: &CommandSpec) -> anyhow::Result<(CommandOutput, ExitReason)> {
+        let output = self.inner.execute(spec)?;
+        let reason = self
+            .inner
+            .classify_exit(output.exit_code, output.blocked_syscall);
+        Ok((output, reason))
+    }
+
+    /// 直接对给定的退出码和 blocked 信息进行分类（委托给内部实现）。
+    pub fn classify_exit(&self, exit_code: i32, blocked: Option<(u32, u32)>) -> ExitReason {
+        self.inner.classify_exit(exit_code, blocked)
+    }
 }

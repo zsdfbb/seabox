@@ -1,6 +1,6 @@
 //! 基于 Landlock + seccomp BPF 的 Linux 沙箱实现。
 //!
-//! 提供实现了 [`Sandbox`] trait 的 [`LinuxSandbox`]：
+//! 提供实现了 [`SandboxImpl`] trait 的 [`LinuxSandbox`]：
 //! 通过 Landlock ACL 做文件系统访问控制，通过手写的 seccomp BPF 黑名单
 //! 做系统调用过滤。
 //!
@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 use crate::config::SandboxConfig;
-use crate::{CommandOutput, CommandSpec, ExitReason, Sandbox};
+use crate::{CommandOutput, CommandSpec, ExitReason, SandboxImpl};
 
 // ---------------------------------------------------------------------------
 // 常量（不依赖 libc 版本）
@@ -81,10 +81,10 @@ pub struct LinuxSandbox {
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox trait 实现
+// SandboxImpl trait 实现
 // ---------------------------------------------------------------------------
 
-impl Sandbox for LinuxSandbox {
+impl SandboxImpl for LinuxSandbox {
     /// 在沙箱内执行一条命令。
     ///
     /// 在**父进程**中构建 Landlock 规则集与 seccomp BPF filter，
@@ -241,12 +241,16 @@ impl Sandbox for LinuxSandbox {
                 // ── PID 1（init）：第二次 fork ──
                 let pid3 = unsafe { libc::fork() };
                 if pid3 < 0 {
-                    unsafe { libc::_exit(1); }
+                    unsafe {
+                        libc::_exit(1);
+                    }
                 }
                 if pid3 > 0 {
                     // PID 1（reaper）：等所有子进程退出后转发退出码
                     let exit_code = do_reaper(pid3);
-                    unsafe { libc::_exit(exit_code); }
+                    unsafe {
+                        libc::_exit(exit_code);
+                    }
                 }
                 // ── PID 2（业务进程）：继续后续 setup ──
             }
@@ -465,8 +469,7 @@ impl LinuxSandbox {
     ///
     /// 空规则 → 返回 `None`（不施加 Landlock 限制）。
     fn prepare_ruleset_fd(&self) -> anyhow::Result<Option<OwnedFd>> {
-        let created =
-            landlock::build_ruleset(&self.config.filesystem.landlock, &std::env::current_dir()?)?;
+        let created = landlock::build_ruleset(&self.config.landlock, &std::env::current_dir()?)?;
 
         // 取出可选的 fd —— 这会消费 RulesetCreated。
         // `From<RulesetCreated> for Option<OwnedFd>` 在 landlock crate
@@ -679,7 +682,7 @@ impl UserNotifHandle {
 ///
 /// worker 在 `poll(listener_fd, -1)` 中等待 notification 或 POLLHUP。
 /// 子进程退出 → listener fd POLLHUP → worker 自然退出。
-
+///
 /// PID namespace 的 init 进程（reaper）。
 ///
 /// 循环 `waitpid(-1)` 收割所有子进程和托孤进程。
