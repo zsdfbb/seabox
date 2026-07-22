@@ -4,19 +4,23 @@
 //! 通过 Landlock ACL 做文件系统访问控制，通过手写的 seccomp BPF 黑名单
 //! 做系统调用过滤。
 //!
-//! ## 执行流程（USER_NOTIF 路径）
+//! ## 执行流程
 //!
-//! 1. **父进程** 构建 Landlock 规则集以及 seccomp BPF filter。
-//! 2. **父进程** 创建 `socketpair(AF_UNIX, SOCK_SEQPACKET)`，得到两端
-//!    `ctrl_parent` / `ctrl_child`，稍后将 fd 经 fork 继承给子进程。
-//! 3. **父进程** `Command::spawn()` 并附带一个 `pre_exec` 闭包。
-//! 4. **子进程**（fork → pre_exec → execve）依次执行：
+//! 1. **父进程** 构建 Landlock 规则集、seccomp BPF filter、namespace 配置。
+//! 2. **父进程** 创建 `socketpair(AF_UNIX, SOCK_SEQPACKET)`，得到两端。
+//! 3. **父进程** `libc::fork()` 创建子进程。
+//! 4. **子进程** 依次执行：
+//!    - `unshare(namespace_flags)`（创建 user/ipc/net/uts/cgroup 命名空间）
+//!    - `unshare(CLONE_NEWPID)` + `fork()`（PID 命名空间 + reaper，如需要）
+//!    - `clearenv()` + `setenv()`（环境变量）
+//!    - `chdir()`（工作目录）
 //!    - `prctl(PR_SET_NO_NEW_PRIVS, 1, …)`
-//!    - `landlock_restrict_self(ruleset_fd, 0)`（若存在规则集）
-//!    - `seccomp(SECCOMP_SET_MODE_FILTER, NEW_LISTENER, &fprog)` 加载 BPF 并
-//!      拿到 listener fd
-//!    - `sendmsg(SCM_RIGHTS)` 把 listener fd 跨 unix socket 交给父进程
-//!    - `execve(...)` 启动目标程序
+//!    - `write(/proc/self/uid_map + gid_map)`（user ns 映射，如需要）
+//!    - `sethostname()`（UTS 主机名，如需要）
+//!    - `landlock_restrict_self(ruleset_fd, 0)`（Landlock ACL，如规则存在）
+//!    - `seccomp(SECCOMP_SET_MODE_FILTER, NEW_LISTENER, &fprog)`（加载 BPF，返回 listener fd）
+//!    - `sendmsg(SCM_RIGHTS)`（将 listener fd 经 socketpair 传给父进程）
+//!    - `execvp(...)`（启动目标程序）
 //! 5. **父进程** worker 线程：
 //!    - 从 socketpair 用 `recvmsg(SCM_RIGHTS)` 拿到 listener fd
 //!    - 循环 `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 阻塞读拦截通知
@@ -34,10 +38,10 @@ pub mod landlock;
 pub mod namespaces;
 pub mod seccomp;
 
+use std::ffi::CString;
 use std::mem::{self, MaybeUninit};
 use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -88,12 +92,6 @@ impl Sandbox for LinuxSandbox {
     /// 并通过 `SECCOMP_RET_USER_NOTIF` 把拦截事件转发到父进程侧的
     /// listener fd，由 worker 线程处理后填入 `BLOCKED_MARKER`。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput> {
-        // 在 spawn 之前先复制 program 名，用于失败时的诊断消息。
-        // sandbox-runtime 通过 `execve` 直接执行单个程序，不解释 shell
-        // 元字符（`>`、`>>`、`|`、`*` 等）；用户传入含 shell 语法的 token
-        // 时，spawn 会以 ENOENT 失败，要在错误里把修改建议说清楚。
-        let program_for_error = spec.program.clone();
-
         // ── 步骤 1：构建 Landlock 规则集并取出其 fd ────────────────────
         let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd()?;
         let raw_ruleset_fd: i32 = ruleset_fd.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1);
@@ -128,11 +126,21 @@ impl Sandbox for LinuxSandbox {
         // 常规 namespace（不含 PID，PID 通过 double-fork 单独处理）
         let ns_ops: Vec<(i32, bool)> = {
             let mut v = Vec::new();
-            if ns.user { v.push((libc::CLONE_NEWUSER, ns.user_try)); }
-            if ns.ipc  { v.push((libc::CLONE_NEWIPC, false)); }
-            if ns.net  { v.push((libc::CLONE_NEWNET, false)); }
-            if ns.uts  { v.push((libc::CLONE_NEWUTS, false)); }
-            if ns.cgroup { v.push((libc::CLONE_NEWCGROUP, ns.cgroup_try)); }
+            if ns.user {
+                v.push((libc::CLONE_NEWUSER, ns.user_try));
+            }
+            if ns.ipc {
+                v.push((libc::CLONE_NEWIPC, false));
+            }
+            if ns.net {
+                v.push((libc::CLONE_NEWNET, false));
+            }
+            if ns.uts {
+                v.push((libc::CLONE_NEWUTS, false));
+            }
+            if ns.cgroup {
+                v.push((libc::CLONE_NEWCGROUP, ns.cgroup_try));
+            }
             v
         };
         let need_pid_reaper = ns.pid;
@@ -148,218 +156,209 @@ impl Sandbox for LinuxSandbox {
         // ── 预计算 hostname bytes ────────────────────────────
         let hostname_bytes: Option<Vec<u8>> = ns.hostname.as_ref().map(|h| h.as_bytes().to_vec());
 
-        // ── 步骤 5：以 pre_exec 施加限制并 spawn 子进程 ───────────────
-        //
-        // 关于 `pre_exec` 的 SAFETY：
-        //
-        // 该闭包在 `fork()` 之后、`execve()` 之前执行。我们特别注意：
-        //
-        // * 只捕获 `raw_ruleset_fd`（一个 `i32`）与 `child_fd_raw`（一个 `i32`）。
-        // * 在闭包内**不**进行任何堆分配或 `format!`（async-signal-safe）。
-        // * 仅调用 `libc::prctl`、`libc::syscall`、`libc::close` 与
-        //   `libc::sendmsg` —— 这些都是 async-signal-safe 的。
-        //
-        // 子进程内的 BPF filter 数据通过 `seccomp::install_user_notif_filter`
-        // 的内部栈上 `sock_fprog` 提供，调用返回后数据已被内核拷走，
-        // 不会越界引用父进程内存。
-        let child = unsafe {
-            std::process::Command::new(&spec.program)
-                .args(&spec.args)
-                .current_dir(&cwd)
-                .env_clear() // 清空继承的环境变量，只保留 spec.env
-                .envs(&spec.env)
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .pre_exec(move || {
-                    // ── 第 1 步：逐个创建常规 namespace（含 user ns）───────
-                    let mut user_ns_active = false;
-                    for &(flag, try_mode) in &ns_ops {
-                        let ret = libc::syscall(libc::SYS_unshare, flag as libc::c_long);
-                        if ret != 0 {
-                            if try_mode {
-                                continue;
-                            }
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        if (flag & libc::CLONE_NEWUSER) != 0 {
-                            user_ns_active = true;
-                        }
-                    }
-
-                    // ── 第 2 步：PID namespace + double-fork reaper ───
-                    // 此时 user ns 已激活（如请求），进程拥有 CAP_SYS_ADMIN。
-                    if need_pid_reaper {
-                        let ret =
-                            libc::syscall(libc::SYS_unshare, libc::CLONE_NEWPID as libc::c_long);
-                        if ret != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-
-                        // 第一次 fork：创建中间进程（非 PID 1）和 PID 1
-                        let pid = libc::fork();
-                        if pid < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-
-                        if pid > 0 {
-                            // ── 中间进程（来自 spawn，非 PID 1）：等待 PID 1 → 转发退出码
-                            let mut status: i32 = 0;
-                            libc::waitpid(pid, &mut status, 0);
-                            let exit_code = if libc::WIFEXITED(status) {
-                                libc::WEXITSTATUS(status)
-                            } else if libc::WIFSIGNALED(status) {
-                                128 + libc::WTERMSIG(status)
-                            } else {
-                                1
-                            };
-                            libc::_exit(exit_code);
-                        }
-
-                        // ── PID 1 进程：第二次 fork，创建 reaper 和业务进程 ──
-                        let pid2 = libc::fork();
-                        if pid2 < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-
-                        if pid2 > 0 {
-                            // ── PID 1 (reaper)：等待业务进程 → 转发退出码 ──
-                            let mut status: i32 = 0;
-                            libc::waitpid(pid2, &mut status, 0);
-                            let exit_code = if libc::WIFEXITED(status) {
-                                libc::WEXITSTATUS(status)
-                            } else if libc::WIFSIGNALED(status) {
-                                128 + libc::WTERMSIG(status)
-                            } else {
-                                1
-                            };
-                            libc::_exit(exit_code);
-                        }
-                        // ── 业务进程（PID=2）：继续下面的 setup ──
-                    }
-
-                    // ── 第 3 步：prctl(NO_NEW_PRIVS) ───────────────────
-                    // seccomp 和 Landlock（非 root 下）均需要 no_new_privs。
-                    let ret = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                    if ret != 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-
-                    // ── 第 4 步：uid/gid 映射 ──────────────────────────
-                    if user_ns_active {
-                        namespaces::write_ns_file(b"/proc/self/uid_map\0", &uid_map_content)?;
-                        let _ = namespaces::write_ns_file(b"/proc/self/setgroups\0", b"deny\n");
-                        namespaces::write_ns_file(b"/proc/self/gid_map\0", &gid_map_content)?;
-                    }
-
-                    // ── 第 5 步：sethostname ───────────────────────────
-                    if let Some(ref h) = hostname_bytes {
-                        namespaces::set_hostname(h)?;
-                    }
-
-                    // ── 第 6 步：landlock ──────────────────────────────
-                    if raw_ruleset_fd >= 0 {
-                        let ret =
-                            libc::syscall(libc::SYS_landlock_restrict_self, raw_ruleset_fd, 0);
-                        if ret != 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        libc::close(raw_ruleset_fd);
-                    }
-
-                    // ── 第 7 步：seccomp BPF filter ───────────────────
-                    let listener_fd = match seccomp::install_user_notif_filter(&bpf_filter) {
-                        Ok(fd) => fd,
-                        Err(_) => {
-                            return Err(std::io::Error::other("install_user_notif_filter failed"));
-                        }
-                    };
-
-                    // ── 第 8 步：sendmsg SCM_RIGHTS ───────────────────
-                    if let Err(e) = send_fd(child_fd_raw, listener_fd) {
-                        libc::close(listener_fd);
-                        libc::close(child_fd_raw);
-                        return Err(e);
-                    }
-                    libc::close(child_fd_raw);
-
-                    Ok(())
-                })
-                .spawn()
-                .with_context(|| {
-                    format!(
-                        "Failed to spawn sandboxed process '{program_for_error}'. \
+        // ── 步骤 5：raw fork + 手动 setup ──────────────────────
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!(
+                    "fork() failed for '{}'. \
                          Note: sandbox-runtime does NOT interpret shell metacharacters \
                          (>, >>, |, *, &&, etc.) — it runs the program directly via execve. \
                          To use shell syntax, invoke 'sh -c' explicitly, e.g. \
                          `-- sh -c \"your shell command here\"`. \
-                         Or split the command into separate args without shell metacharacters."
-                    )
-                })?
-        };
-
-        // 关闭子端 socketpair fd（OwnedFd drop → RAII close）。无论 pre_exec
-        // 是否成功执行 sendmsg，子端都必须在父进程中关闭；否则 socketpair 连接
-        // 存活，worker 线程的 recvmsg 永远阻塞（死锁详见 docs/learned.md）。
-        drop(child_sock);
-
-        let pid = child.id() as libc::id_t;
-
-        // ── 步骤 6：spawn USER_NOTIF worker + 共享 blocked ─────────
-        //
-        // worker 线程负责：
-        // 1. 通过 `recvmsg(SCM_RIGHTS)` 从父端 socketpair 拿到 listener fd。
-        // 2. 进入循环 `poll([listener_fd, shutdown_r])`：
-        //    - listener_fd 可读 → `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 读拦截
-        //      并通过 `ioctl(SECCOMP_IOCTL_NOTIF_SEND)` 回复 EPERM。
-        //    - shutdown_r 可读 → 主线程已 wait 完，写了 1 字节，break 退出。
-        //
-        // 关键：用 self-pipe 让 worker 在子进程**正常退出**（未触发黑名单）
-        // 也能立即醒来退出。原来的实现 `ioctl(RECV)` 阻塞会 hang。
-        //
-        // worker 把捕获到的最后一个 `(nr, arch)` 写入共享 `blocked`
-        // （多个 syscall 时记录**最后一次**——黑名单每次只触发一条）。
-        let blocked = std::sync::Arc::new(std::sync::Mutex::new(None::<(u32, u32)>));
-
-        // 把父端 socketpair 的 raw fd 抽出来传给 helper，避免
-        // 把 OwnedFd 移进闭包后外面还要 drop（helper 内部只借用 raw fd）。
-        let parent_fd_raw = parent_stream.as_raw_fd();
-        let _notif_handle = spawn_user_notif_worker(parent_fd_raw, &blocked)?;
-
-        // ── 步骤 8：waitid(WEXITED) —— 阻塞到子进程退出 ─────────────
-        //
-        // 与 TRAP 路径不同：USER_NOTIF 下子进程**不会**被信号杀死，
-        // 而是黑名单 syscall 在入口返回 EPERM，进程自然继续。
-        // 因此 exit_code 与普通程序一样。
-        //
-        // SAFETY：siginfo 由 waitid 写入。
-        let mut siginfo: libc::siginfo_t = unsafe { mem::zeroed() };
-        let r = unsafe { libc::waitid(libc::P_PID, pid, &mut siginfo, libc::WEXITED) };
-        if r != 0 {
-            let e = std::io::Error::last_os_error();
-            // waitid 失败，关闭父端 socketpair 让 worker recv_fd 退出。
-            drop(parent_stream);
-            return Err(e).with_context(|| {
-                format!("waitid(WEXITED) failed for sandboxed process '{program_for_error}'")
+                         Or split the command into separate args without shell metacharacters.",
+                    spec.program
+                )
             });
         }
 
-        // 子进程已退出。worker 线程会在 listener fd 上收到 POLLHUP 后自然退出。
-        // notif_handle 在函数结束时被 drop。
+        if pid == 0 {
+            // ── 子进程：namespace + sandbox setup + exec ──
 
-        // ── 步骤 9：读取 blocked ─────────────────────────────────
-        let blocked_val = blocked.lock().ok().and_then(|g| *g);
+            // 第 1 步：创建常规 namespace（含 user ns）
+            let mut user_ns_active = false;
+            for &(flag, try_mode) in &ns_ops {
+                let ret = unsafe { libc::syscall(libc::SYS_unshare, flag as libc::c_long) };
+                if ret != 0 {
+                    if try_mode {
+                        continue;
+                    }
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
+                if (flag & libc::CLONE_NEWUSER) != 0 {
+                    user_ns_active = true;
+                }
+            }
 
-        // 退出码：正常退出 → ExitCode；信号杀死 → 128 + signum。
-        // SAFETY：siginfo 由上面的 waitid 调用写入并填充了 si_code/si_status。
-        let exit_code = if siginfo.si_code == libc::CLD_EXITED {
-            unsafe { siginfo.si_status() }
-        } else if siginfo.si_code == libc::CLD_KILLED || siginfo.si_code == libc::CLD_DUMPED {
-            128 + unsafe { siginfo.si_status() }
+            // 第 2 步：PID namespace（如果需要）
+            if need_pid_reaper {
+                let ret =
+                    unsafe { libc::syscall(libc::SYS_unshare, libc::CLONE_NEWPID as libc::c_long) };
+                if ret != 0 {
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
+
+                // unshare 后此进程是 PID 1（init）。fork 出业务进程
+                let pid2 = unsafe { libc::fork() };
+                if pid2 < 0 {
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
+                if pid2 > 0 {
+                    // PID 1（reaper）：等待业务进程，转发退出码
+                    let mut status: i32 = 0;
+                    unsafe {
+                        libc::waitpid(pid2, &mut status, 0);
+                    }
+                    let exit_code = if libc::WIFEXITED(status) {
+                        libc::WEXITSTATUS(status)
+                    } else if libc::WIFSIGNALED(status) {
+                        128 + libc::WTERMSIG(status)
+                    } else {
+                        1
+                    };
+                    unsafe {
+                        libc::_exit(exit_code);
+                    }
+                }
+                // 业务进程：继续后续 setup
+            }
+
+            // 第 3 步：clearenv + setenv
+            unsafe {
+                libc::clearenv();
+            }
+            for (key, val) in &spec.env {
+                let k = CString::new(key.as_str()).unwrap_or_default();
+                let v = CString::new(val.as_str()).unwrap_or_default();
+                unsafe {
+                    libc::setenv(k.as_ptr(), v.as_ptr(), 1);
+                }
+            }
+
+            // 第 4 步：chdir
+            let cwd_str = cwd.to_str().unwrap_or("/");
+            let cwd_c = CString::new(cwd_str).unwrap_or_default();
+            if unsafe { libc::chdir(cwd_c.as_ptr()) } != 0 {
+                unsafe {
+                    libc::_exit(1);
+                }
+            }
+
+            // 第 5 步：prctl(NO_NEW_PRIVS)
+            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                unsafe {
+                    libc::_exit(1);
+                }
+            }
+
+            // 第 6 步：uid/gid map
+            if user_ns_active {
+                unsafe {
+                    namespaces::write_ns_file(b"/proc/self/uid_map\0", &uid_map_content).ok();
+                }
+                unsafe {
+                    let _ = namespaces::write_ns_file(b"/proc/self/setgroups\0", b"deny\n");
+                }
+                unsafe {
+                    namespaces::write_ns_file(b"/proc/self/gid_map\0", &gid_map_content).ok();
+                }
+            }
+
+            // 第 7 步：sethostname
+            if let Some(ref h) = hostname_bytes {
+                unsafe {
+                    namespaces::set_hostname(h).ok();
+                }
+            }
+
+            // 第 8 步：landlock
+            if raw_ruleset_fd >= 0 {
+                let ret =
+                    unsafe { libc::syscall(libc::SYS_landlock_restrict_self, raw_ruleset_fd, 0) };
+                if ret != 0 {
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
+                unsafe {
+                    libc::close(raw_ruleset_fd);
+                }
+            }
+
+            // 第 9 步：seccomp → listener fd
+            let listener_fd = match seccomp::install_user_notif_filter(&bpf_filter) {
+                Ok(fd) => fd,
+                Err(_) => unsafe {
+                    libc::_exit(1);
+                },
+            };
+
+            // 第 10 步：sendmsg SCM_RIGHTS
+            if send_fd(child_fd_raw, listener_fd).is_err() {
+                unsafe {
+                    libc::close(listener_fd);
+                }
+                unsafe {
+                    libc::close(child_fd_raw);
+                }
+                unsafe {
+                    libc::_exit(1);
+                }
+            }
+            unsafe {
+                libc::close(child_fd_raw);
+            }
+
+            // 第 11 步：execvp
+            let cstring_args: Vec<CString> = std::iter::once(spec.program.clone())
+                .chain(spec.args.clone())
+                .map(|a| CString::new(a).unwrap_or_default())
+                .collect();
+            let mut argv: Vec<*const libc::c_char> =
+                cstring_args.iter().map(|a| a.as_ptr()).collect();
+            argv.push(std::ptr::null());
+            unsafe {
+                libc::execvp(argv[0], argv.as_ptr());
+            }
+
+            // execvp 失败才走到这里
+            unsafe {
+                libc::_exit(127);
+            }
+        }
+
+        // ── 父进程 ──
+        drop(child_sock);
+
+        let blocked = std::sync::Arc::new(std::sync::Mutex::new(None::<(u32, u32)>));
+        let parent_fd_raw = parent_stream.as_raw_fd();
+        let _notif_handle = spawn_user_notif_worker(parent_fd_raw, &blocked)?;
+
+        // waitpid 替代 waitid
+        let mut status: i32 = 0;
+        let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if r < 0 {
+            let e = std::io::Error::last_os_error();
+            drop(parent_stream);
+            return Err(e).with_context(|| {
+                format!("waitpid() failed for sandboxed process '{}'", spec.program)
+            });
+        }
+        let exit_code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else if libc::WIFSIGNALED(status) {
+            128 + libc::WTERMSIG(status)
         } else {
             -1
         };
 
-        // ── 步骤 10：构造 CommandOutput ───────────────────────────
+        let blocked_val = blocked.lock().ok().and_then(|g| *g);
         Ok(CommandOutput {
             exit_code,
             blocked_syscall: blocked_val,
