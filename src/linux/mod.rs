@@ -123,10 +123,18 @@ impl Sandbox for LinuxSandbox {
         // ── 计算 namespace 参数 ────────────────────────────────
         let ns = &self.config.namespaces;
 
+        // PID ns 在非 root 下需要 user ns 来获取 CAP_SYS_ADMIN。
+        // 这里规范化 so 无论 CLI 还是 crate API 路径都覆盖。
+        let effective_user = if ns.pid && !ns.user && unsafe { libc::geteuid() } != 0 {
+            true
+        } else {
+            ns.user
+        };
+
         // 常规 namespace（不含 PID，PID 通过 double-fork 单独处理）
         let ns_ops: Vec<(i32, bool)> = {
             let mut v = Vec::new();
-            if ns.user {
+            if effective_user {
                 v.push((libc::CLONE_NEWUSER, ns.user_try));
             }
             if ns.ipc {

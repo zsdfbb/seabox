@@ -155,8 +155,108 @@ impl ExitReason {
 }
 
 // ---------------------------------------------------------------------------
-// CommandSpec
+// 平台工厂
 // ---------------------------------------------------------------------------
+
+/// 创建当前平台对应的沙箱实例。
+///
+/// Linux:   [`LinuxSandbox`]（Landlock + seccomp + namespace）
+/// macOS:   暂不支持，返回错误
+pub fn create_sandbox(config: config::SandboxConfig) -> anyhow::Result<Box<dyn Sandbox>> {
+    #[cfg(target_os = "linux")]
+    { return Ok(Box::new(linux::LinuxSandbox { config })); }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = config;
+        anyhow::bail!(
+            "sandbox-runtime requires Linux; \
+             the current platform is not supported"
+        );
+    }
+}
+
+/// 检查当前系统的沙箱能力，返回格式化诊断文本。
+///
+/// Linux:   Landlock ABI、Seccomp、6 种 namespace 可用性
+/// macOS:   全部标记为 not available
+pub fn check_capabilities() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        let landlock = if linux::landlock::is_available() {
+            format!(
+                "available (ABI v{})",
+                linux::landlock::get_abi_version().unwrap_or(0)
+            )
+        } else {
+            "not available".to_string()
+        };
+        let seccomp = if linux::seccomp::is_available() {
+            "available"
+        } else {
+            "not available"
+        };
+        let user_ns = if linux::namespaces::is_user_namespace_available() {
+            "available"
+        } else {
+            "not available"
+        };
+        let ipc_ns = if linux::namespaces::is_ipc_namespace_available() {
+            "available"
+        } else {
+            "not available"
+        };
+        let pid_ns = if linux::namespaces::is_pid_namespace_available() {
+            "available"
+        } else {
+            "not available"
+        };
+        let net_ns = if linux::namespaces::is_net_namespace_available() {
+            "available"
+        } else {
+            "not available"
+        };
+        let uts_ns = if linux::namespaces::is_uts_namespace_available() {
+            "available"
+        } else {
+            "not available"
+        };
+        let cgroup_ns = if linux::namespaces::is_cgroup_namespace_available() {
+            "available"
+        } else {
+            "not available"
+        };
+
+        format!(
+            "Capability                    Status\n\
+             ----------------------------- --------------------\n\
+             Landlock                      {landlock}\n\
+             Seccomp                       {seccomp}\n\
+             User namespace                {user_ns}\n\
+             IPC namespace                 {ipc_ns}\n\
+             PID namespace                 {pid_ns}\n\
+             Network namespace             {net_ns}\n\
+             UTS namespace                 {uts_ns}\n\
+             Cgroup namespace              {cgroup_ns}\n"
+        )
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        format!(
+            "Capability                    Status\n\
+             ----------------------------- --------------------\n\
+             Landlock                      not available (non-Linux)\n\
+             Seccomp                       not available (non-Linux)\n\
+             User namespace                not available (non-Linux)\n\
+             IPC namespace                 not available (non-Linux)\n\
+             PID namespace                 not available (non-Linux)\n\
+             Network namespace             not available (non-Linux)\n\
+             UTS namespace                 not available (non-Linux)\n\
+             Cgroup namespace              not available (non-Linux)\n"
+        )
+    }
+}
 
 /// 在沙箱内运行的完整命令规格。
 ///

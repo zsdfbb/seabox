@@ -4,12 +4,8 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use sandbox_runtime::config::NamespacesConfig;
-use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{CommandSpec, ExitReason, LandlockPerm, LandlockRule, Sandbox};
-
-#[cfg(target_os = "linux")]
-use sandbox_runtime::linux::{self, LinuxSandbox};
+use sandbox_runtime::config::{NamespacesConfig, SandboxConfig};
+use sandbox_runtime::{CommandSpec, ExitReason, LandlockPerm, LandlockRule};
 
 // ---------------------------------------------------------------------------
 // CLI 定义
@@ -152,7 +148,6 @@ fn main() -> anyhow::Result<()> {
 // run 子命令
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 fn cmd_run(
     landlock: Vec<String>,
@@ -212,7 +207,8 @@ fn cmd_run(
         hostname,
     )?;
 
-    let sandbox = LinuxSandbox { config };
+    let timeout = Duration::from_secs(config.timeout.default_secs);
+    let sandbox = sandbox_runtime::create_sandbox(config)?;
 
     let program = command[0].clone();
     let args = command[1..].to_vec();
@@ -235,7 +231,7 @@ fn cmd_run(
         args,
         cwd,
         env,
-        timeout: Duration::from_secs(sandbox.config.timeout.default_secs),
+        timeout,
     };
 
     let output = sandbox.execute(&spec)?;
@@ -261,126 +257,12 @@ fn cmd_run(
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn cmd_run(
-    _landlock: Vec<String>,
-    _allow_network: bool,
-    _debug: bool,
-    _command: Vec<String>,
-    _unshare_all: bool,
-    _unshare_user: bool,
-    _unshare_ipc: bool,
-    _unshare_pid: bool,
-    _unshare_net: bool,
-    _unshare_uts: bool,
-    _unshare_cgroup: bool,
-    _unshare_user_try: bool,
-    _unshare_cgroup_try: bool,
-    _uid: Option<u32>,
-    _gid: Option<u32>,
-    _hostname: Option<String>,
-    _chdir: Option<PathBuf>,
-    _clearenv: bool,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "sandbox-runtime run requires Linux; \
-         the current platform is not supported"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // check 子命令
 // ---------------------------------------------------------------------------
 
 fn cmd_check() -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let landlock_avail = linux::landlock::is_available();
-        let landlock_abi = linux::landlock::get_abi_version();
-        let seccomp_avail = linux::seccomp::is_available();
-
-        println!("Capability                    Status");
-        println!("----------------------------- --------------------");
-        println!(
-            "Landlock                      {}",
-            if landlock_avail {
-                format!("available (ABI v{})", landlock_abi.unwrap_or(0))
-            } else {
-                "not available".to_string()
-            }
-        );
-        println!(
-            "Seccomp                       {}",
-            if seccomp_avail {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-        println!(
-            "User namespace                {}",
-            if linux::namespaces::is_user_namespace_available() {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-        println!(
-            "IPC namespace                 {}",
-            if linux::namespaces::is_ipc_namespace_available() {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-        println!(
-            "PID namespace                 {}",
-            if linux::namespaces::is_pid_namespace_available() {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-        println!(
-            "Network namespace             {}",
-            if linux::namespaces::is_net_namespace_available() {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-        println!(
-            "UTS namespace                 {}",
-            if linux::namespaces::is_uts_namespace_available() {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-        println!(
-            "Cgroup namespace              {}",
-            if linux::namespaces::is_cgroup_namespace_available() {
-                "available"
-            } else {
-                "not available"
-            }
-        );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        println!("Capability                    Status");
-        println!("----------------------------- --------------------");
-        println!("Landlock                      not available (non-Linux)");
-        println!("Seccomp                       not available (non-Linux)");
-        println!("User namespace                not available (non-Linux)");
-        println!("IPC namespace                 not available (non-Linux)");
-        println!("PID namespace                 not available (non-Linux)");
-        println!("Network namespace             not available (non-Linux)");
-        println!("UTS namespace                 not available (non-Linux)");
-        println!("Cgroup namespace              not available (non-Linux)");
-    }
-
+    print!("{}", sandbox_runtime::check_capabilities());
     Ok(())
 }
 
