@@ -116,9 +116,9 @@ impl Sandbox for LinuxSandbox {
         // - 子端原始 fd 数值 `child_fd` 通过 `i32` 传入 `pre_exec` 闭包
         //   （async-signal-safe），由 `send_fd` 调用后显式 `libc::close`。
         let (parent_stream, child_sock) = create_socketpair()?;
-        // 提取原始 fd 数值供 pre_exec 闭包使用（闭包内只能访问 i32 Copy，
-        // 不能持有 OwnedFd——闭包在 fork 后 drop 会双关同一 fd）。
+        // 提取原始 fd 数值供子进程关闭（fork 后子进程继承了两端 fd）
         let child_fd_raw = child_sock.as_raw_fd();
+        let parent_fd_raw_for_child = parent_stream.as_raw_fd();
 
         // ── 计算 namespace 参数 ────────────────────────────────
         let ns = &self.config.namespaces;
@@ -202,7 +202,11 @@ impl Sandbox for LinuxSandbox {
                     }
                 }
 
-                // unshare 后此进程是 PID 1（init）。fork 出业务进程
+                // unshare 后 fork() 的子进程是 PID 1（init）。需要两次 fork：
+                //   第一次 fork: 父进程（非 PID 1）wait → _exit
+                //               子进程（PID 1）继续
+                //   第二次 fork: PID 1（reaper）wait → _exit
+                //               子进程（PID 2）执行业务
                 let pid2 = unsafe { libc::fork() };
                 if pid2 < 0 {
                     unsafe {
@@ -210,7 +214,7 @@ impl Sandbox for LinuxSandbox {
                     }
                 }
                 if pid2 > 0 {
-                    // PID 1（reaper）：等待业务进程，转发退出码
+                    // 第一次 fork 的父进程（非 PID 1）：等待 PID 1
                     let mut status: i32 = 0;
                     unsafe {
                         libc::waitpid(pid2, &mut status, 0);
@@ -226,7 +230,31 @@ impl Sandbox for LinuxSandbox {
                         libc::_exit(exit_code);
                     }
                 }
-                // 业务进程：继续后续 setup
+                // ── PID 1（init）：第二次 fork ──
+                let pid3 = unsafe { libc::fork() };
+                if pid3 < 0 {
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
+                if pid3 > 0 {
+                    // PID 1（reaper）：等待业务进程（PID 2）
+                    let mut status: i32 = 0;
+                    unsafe {
+                        libc::waitpid(pid3, &mut status, 0);
+                    }
+                    let exit_code = if libc::WIFEXITED(status) {
+                        libc::WEXITSTATUS(status)
+                    } else if libc::WIFSIGNALED(status) {
+                        128 + libc::WTERMSIG(status)
+                    } else {
+                        1
+                    };
+                    unsafe {
+                        libc::_exit(exit_code);
+                    }
+                }
+                // ── PID 2（业务进程）：继续后续 setup ──
             }
 
             // 第 3 步：clearenv + setenv
@@ -313,6 +341,11 @@ impl Sandbox for LinuxSandbox {
             }
             unsafe {
                 libc::close(child_fd_raw);
+            }
+
+            // 关掉子进程继承的 parent_stream 端，避免泄漏到 exec 后的业务进程
+            unsafe {
+                libc::close(parent_fd_raw_for_child);
             }
 
             // 第 11 步：execvp

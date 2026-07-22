@@ -236,7 +236,12 @@ fn clearenv_works() {
 
 #[test]
 fn unshare_pid_isolates() {
-    if skip_if_no_pid_ns() {
+    // PID ns 在非 root 下需要 user ns。如果 PID ns 探针失败但 user ns 可
+    // 用，仍然可以跑（CLI 会自动隐含 --unshare-user）。
+    let pid_ok = namespaces::is_pid_namespace_available();
+    let user_ok = namespaces::is_user_namespace_available();
+    if !pid_ok && !user_ok {
+        eprintln!("neither PID ns nor user ns available, skipping test");
         return;
     }
     let out = run_cli(&["run", "--unshare-pid", "--", "sh", "-c", "echo $$"]);
@@ -394,4 +399,25 @@ fn unshare_user_uid_0_gid_0() {
     let lines: Vec<&str> = out.stdout.trim().lines().collect();
     assert_eq!(lines[0].trim(), "0", "uid should be 0");
     assert_eq!(lines[1].trim(), "0", "gid should be 0");
+}
+
+// ---------------------------------------------------------------------------
+// N15: --unshare-pid 退出码转发
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unshare_pid_exit_code_forwarding() {
+    let pid_ok = namespaces::is_pid_namespace_available();
+    let user_ok = namespaces::is_user_namespace_available();
+    if !pid_ok && !user_ok {
+        eprintln!("neither PID ns nor user ns available, skipping test");
+        return;
+    }
+    let out = run_cli(&["run", "--unshare-pid", "--", "sh", "-c", "exit 42"]);
+    assert_eq!(
+        out.exit_code,
+        Some(42),
+        "exit code 42 should be forwarded through reaper chain, got: {:?}",
+        out
+    );
 }

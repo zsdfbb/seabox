@@ -419,11 +419,17 @@ fn build_config(
         .iter()
         .map(|s| parse_landlock_spec(s))
         .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // --unshare-pid 在非 root 下需要 user ns 来获取 CAP_SYS_ADMIN
+    let pid_without_user = (unshare_pid || unshare_all) && !unshare_user && !unshare_all;
+    let need_user_for_pid = pid_without_user && unsafe { libc::geteuid() } != 0;
+    let effective_user = unshare_user || unshare_all || need_user_for_pid;
+
     Ok(SandboxConfig::builder()
         .landlock(rules)
         .network_enabled(allow_network)
         .namespaces(NamespacesConfig {
-            user: unshare_user || unshare_all,
+            user: effective_user,
             ipc: unshare_ipc || unshare_all,
             pid: unshare_pid || unshare_all,
             net: unshare_net || unshare_all,
