@@ -20,6 +20,13 @@
 //! - N12: --unshare-user-try 静默回退
 //! - N13: check 输出包含命名空间状态
 //! - N14: --unshare-user --uid 0 --gid 0
+//! - N15: --unshare-pid 退出码转发
+//! - N16: --env 设置环境变量
+//! - N17: --clearenv + --env 组合
+//! - N18: --unsetenv 删除环境变量
+//! - N19: --env 后者覆盖前者
+//! - N20: --env 不含 = 报错
+//! - N21: --unsetenv 不存在的变量是 no-op
 
 #![cfg(target_os = "linux")]
 
@@ -423,4 +430,109 @@ fn unshare_pid_exit_code_forwarding() {
         "exit code 42 should be forwarded through reaper chain, got: {:?}",
         out
     );
+}
+
+// ---------------------------------------------------------------------------
+// N16: --env 设置环境变量
+// ---------------------------------------------------------------------------
+
+#[test]
+fn env_flag_sets_variable() {
+    let out = run_cli(&["run", "--env", "SANDBOX_TEST=hello", "--", "sh", "-c", "echo $SANDBOX_TEST"]);
+    assert_eq!(out.exit_code, Some(0), "--env: {:?}", out);
+    assert_eq!(
+        out.stdout.trim(),
+        "hello",
+        "SANDBOX_TEST should be 'hello'"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// N17: --clearenv + --env 组合（只保留 --env 设置的变量）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clearenv_with_env_combines() {
+    let out = run_cli(&[
+        "run", "--clearenv", "--env", "SANDBOX_TEST=world",
+        "--", "sh", "-c", "echo \"[$SANDBOX_TEST] [$HOME]\"",
+    ]);
+    assert_eq!(out.exit_code, Some(0), "clearenv+env: {:?}", out);
+    assert_eq!(
+        out.stdout.trim(),
+        "[world] []",
+        "SANDBOX_TEST should be 'world' and HOME should be empty"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// N18: --unsetenv 删除环境变量
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unsetenv_removes_variable() {
+    // 注意：sh（dash）有编译期内置 fallback PATH，所以不能用 `echo $PATH` 验证。
+    // 直接跑 `env` 确认变量已被删除。
+    let out = run_cli(&["run", "--unsetenv", "PATH", "--", "env"]);
+    assert_eq!(out.exit_code, Some(0), "--unsetenv PATH: {:?}", out);
+    assert!(
+        !out.stdout.lines().any(|l| l.starts_with("PATH=")),
+        "PATH should not appear in `env` output after --unsetenv"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// N19: --env 后者覆盖前者
+// ---------------------------------------------------------------------------
+
+#[test]
+fn env_latter_overrides_former() {
+    let out = run_cli(&[
+        "run", "--env", "OVERRIDE=first", "--env", "OVERRIDE=second",
+        "--", "sh", "-c", "echo $OVERRIDE",
+    ]);
+    assert_eq!(out.exit_code, Some(0), "--env override: {:?}", out);
+    assert_eq!(
+        out.stdout.trim(),
+        "second",
+        "later --env should override earlier one"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// N20: --env 不含 = 报错
+// ---------------------------------------------------------------------------
+
+#[test]
+fn env_missing_equals_fails() {
+    let out = run_cli(&["run", "--env", "BADKEY", "--", "sh", "-c", "echo hi"]);
+    assert!(
+        out.exit_code != Some(0),
+        "--env BADKEY should fail, got exit_code={:?}",
+        out.exit_code
+    );
+    assert!(
+        out.stderr.contains("KEY=VALUE"),
+        "stderr should contain helpful error message, got: {:?}",
+        out.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// N21: --unsetenv 不存在的变量是 no-op
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unsetenv_nonexistent_is_noop() {
+    let out = run_cli(&[
+        "run", "--unsetenv", "THIS_VAR_DOES_NOT_EXIST_12345",
+        "--", "sh", "-c", "echo ok",
+    ]);
+    assert_eq!(
+        out.exit_code,
+        Some(0),
+        "unsetenv nonexistent var should be no-op, got: {:?}",
+        out
+    );
+    assert_eq!(out.stdout.trim(), "ok");
 }

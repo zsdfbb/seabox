@@ -7,6 +7,19 @@ use clap::Parser;
 use sandbox_runtime::config::{parse_landlock_spec, NamespacesConfig, SandboxConfig};
 use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
 
+/// 解析 `KEY=VALUE` 格式的环境变量，返回 `(key, value)`。
+fn parse_env_var(s: &str) -> Result<(String, String), String> {
+    let (key, val) = s.split_once('=').ok_or_else(|| {
+        format!(
+            "invalid --env value '{s}': expected KEY=VALUE format (missing '=')"
+        )
+    })?;
+    if key.is_empty() {
+        return Err("invalid --env value: KEY must not be empty".into());
+    }
+    Ok((key.to_owned(), val.to_owned()))
+}
+
 // ---------------------------------------------------------------------------
 // CLI 定义
 // ---------------------------------------------------------------------------
@@ -72,6 +85,14 @@ enum Cli {
         #[arg(long)]
         chdir: Option<PathBuf>,
 
+        /// 设置或覆盖环境变量，格式 KEY=VALUE（可重复）
+        #[arg(long, value_parser = parse_env_var)]
+        env: Vec<(String, String)>,
+
+        /// 删除环境变量（可重复）
+        #[arg(long)]
+        unsetenv: Vec<String>,
+
         /// 清空环境变量
         #[arg(long)]
         clearenv: bool,
@@ -118,6 +139,8 @@ fn main() -> anyhow::Result<()> {
             gid,
             hostname,
             chdir,
+            env: env_vars,
+            unsetenv,
             clearenv,
         } => cmd_run(
             landlock,
@@ -137,6 +160,8 @@ fn main() -> anyhow::Result<()> {
             gid,
             hostname,
             chdir,
+            env_vars,
+            unsetenv,
             clearenv,
         ),
         Cli::Check => cmd_check(),
@@ -168,6 +193,8 @@ fn cmd_run(
     gid: Option<u32>,
     hostname: Option<String>,
     chdir: Option<PathBuf>,
+    env_vars: Vec<(String, String)>,
+    unsetenv: Vec<String>,
     clearenv: bool,
 ) -> anyhow::Result<()> {
     if command.is_empty() {
@@ -213,12 +240,18 @@ fn cmd_run(
     let program = command[0].clone();
     let args = command[1..].to_vec();
 
-    // 处理 --clearenv
-    let env: HashMap<String, String> = if clearenv {
+    // 处理 --clearenv + --unsetenv + --env
+    let mut env: HashMap<String, String> = if clearenv {
         HashMap::new()
     } else {
         std::env::vars().collect()
     };
+    for key in &unsetenv {
+        env.remove(key);
+    }
+    for (key, value) in &env_vars {
+        env.insert(key.clone(), value.clone());
+    }
 
     // 处理 --chdir（覆盖默认 cwd）
     let cwd = match chdir {
