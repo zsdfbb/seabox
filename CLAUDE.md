@@ -80,11 +80,14 @@ sandbox-runtime-rs/
 cargo build
 cargo build --release
 
-# 运行沙箱（当前 CLI：--landlock path:perm 方式）
+# 运行沙箱
 cargo run -- run --landlock '/:ro' -- cat /etc/passwd
 cargo run -- run --landlock '/:ro' --landlock '/tmp:rw' -- cargo build
-cargo run -- run --allow-network -- curl example.com    # 网络占位
-cargo run -- run -- ls -la                               # full-access
+cargo run -- run --allow-network -- curl example.com       # 网络占位
+cargo run -- run -- ls -la                                  # full-access
+cargo run -- run --env FOO=bar -- sh -c 'echo $FOO'        # 设置环境变量
+cargo run -- run --unsetenv HOME -- sh -c 'echo $HOME'     # 删除环境变量
+cargo run -- run --clearenv --env PATH=/usr/bin -- ls       # 白名单模式
 
 # 检查当前系统能力
 cargo run -- check
@@ -117,6 +120,10 @@ cargo check
 - `classify_exit()` 以结构化 `blocked: Option<(u32, u32)>` 作为首选判断依据
 - 交叉编译目标：`x86_64-unknown-linux-musl`（静态链接），`aarch64-apple-darwin`
 - License: MIT（见 `/LICENSE`）
+- **CLI + Crate API 对应**：每个 CLI flag 都应有对应的 crate 层 `with_*` 方法。
+  沙箱配置（`--unshare-user`、`--landlock` 等）对应 `SandboxConfig::with_*`；
+  命令规格（`--env`、`--clearenv`、`--chdir` 等）对应 `CommandSpec::with_*`。
+  新增 CLI flag 时先检查对应 struct 上是否存在 `with_*` 方法，没有就一并添加。
 
 ## 测试
 
