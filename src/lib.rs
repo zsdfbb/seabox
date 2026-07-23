@@ -257,6 +257,20 @@ pub fn check_capabilities() -> String {
 /// 在沙箱内运行的完整命令规格。
 ///
 /// 这是 [`Sandbox::execute`] 的输入。
+///
+/// 可通过 `with_*` 链式方法配置：
+///
+/// ```
+/// use sandbox_runtime::CommandSpec;
+///
+/// let spec = CommandSpec::default()
+///     .with_program("sh")
+///     .with_args(["-c", "echo $FOO"])
+///     .with_clearenv()
+///     .with_env("FOO", "bar");
+/// assert_eq!(spec.env.get("FOO"), Some(&"bar".into()));
+/// assert_eq!(spec.env.len(), 1);
+/// ```
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     /// 要执行的程序（路径或通过 `PATH` 解析的名称）。
@@ -269,6 +283,66 @@ pub struct CommandSpec {
     pub env: HashMap<String, String>,
     /// 命令在被杀死前的最大运行时间（wall-clock）。
     pub timeout: Duration,
+}
+
+impl Default for CommandSpec {
+    fn default() -> Self {
+        Self {
+            program: String::new(),
+            args: Vec::new(),
+            cwd: PathBuf::from("/"),
+            env: HashMap::new(),
+            timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+impl CommandSpec {
+    /// 设置要执行的程序。
+    pub fn with_program(mut self, program: impl Into<String>) -> Self {
+        self.program = program.into();
+        self
+    }
+
+    /// 设置传递给程序的参数（不包含程序名本身）。
+    pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// 设置工作目录。
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = cwd.into();
+        self
+    }
+
+    /// 设置超时时间。
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// 清空所有环境变量。
+    pub fn with_clearenv(mut self) -> Self {
+        self.env.clear();
+        self
+    }
+
+    /// 设置（或覆盖）一个环境变量。
+    ///
+    /// 对应 CLI 的 `--env KEY=VALUE`。
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
+    }
+
+    /// 移除一个环境变量。
+    ///
+    /// 对应 CLI 的 `--unsetenv KEY`。
+    pub fn with_unsetenv(mut self, key: impl Into<String>) -> Self {
+        self.env.remove(&key.into());
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
