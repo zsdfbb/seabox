@@ -1,6 +1,7 @@
 //! Landlock 规则集构造。
 //!
-//! 提供根据 [`FsPolicy`] 配置构建 Landlock 文件系统 ACL 规则集的函数。
+//! 提供根据 [`LandlockRule`](crate::LandlockRule) 列表构建 Landlock
+//! 文件系统 ACL 规则集的函数。
 //!
 //! 使用 `landlock` crate 的 [`CompatLevel::BestEffort`]，
 //! 自动检测 ABI 版本并在不支持完整访问集的内核上优雅降级。
@@ -11,11 +12,15 @@
 //! use landlock::RulesetCreated;
 //!
 //! let created: Option<RulesetCreated> = build_ruleset(
-//!     &FsPolicy::ReadOnly, &[], Path::new("/"),
+//!     &[LandlockRule { path: "/".into(), perms: vec![
+//!         LandlockPerm::ReadFile,
+//!         LandlockPerm::ReadDir,
+//!         LandlockPerm::Execute,
+//!     ]}], Path::new("/"),
 //! )?;
 //! if let Some(ruleset) = created {
 //!     // 规则集已配置但**尚未生效**。
-//!     // 在合适的时机（如 pre_exec 闭包内）施加：
+//!     // 在合适的时机（如在 fork 后 exec 前）施加：
 //!     let status = ruleset.restrict_self()?;
 //! }
 //! ```
@@ -124,7 +129,7 @@ fn get_effective_abi() -> ABI {
 /// 根据给定的文件系统策略构建 Landlock 规则集。
 ///
 /// 返回的 [`RulesetCreated`] 已**配置好规则但尚未生效**。调用方必须在合适的
-/// 时刻（例如在 `pre_exec` 闭包中、位于 `fork()` 之后、`execve()` 之前）
+/// 时刻（例如在 `fork()` 之后、`execve()` 之前的子进程中）
 /// 调用 [`RulesetCreated::restrict_self`]。这种两阶段构造允许父进程构建
 /// 规则集，而子进程在零分配上下文中施加它。
 ///

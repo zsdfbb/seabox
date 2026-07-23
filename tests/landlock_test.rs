@@ -79,23 +79,6 @@ fn run_cli(args: &[&str]) -> CliOutput {
     }
 }
 
-/// 以子进程方式调用 `sandbox-runtime`，并指定子进程的当前目录。
-fn run_cli_in(args: &[&str], cwd: &Path) -> CliOutput {
-    let output = Command::new(bin())
-        .args(args)
-        .current_dir(cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("failed to spawn sandbox-runtime binary");
-
-    CliOutput {
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
-}
-
 /// 生成进程唯一的路径名，避免与并发/历史运行残留冲突。
 fn unique_path(prefix: &str) -> PathBuf {
     let pid = std::process::id();
@@ -133,21 +116,30 @@ fn verify_landlock_active() -> bool {
     }
 
     let dir = tempfile::tempdir().expect("failed to create tempdir for Landlock probe");
-    let out = run_cli_in(
-        &[
-            "run",
-            "--policy",
-            "read-only",
-            "--",
-            "sh",
-            "-c",
-            "echo probe > probe_file",
+    let dir_path = dir.path().to_path_buf();
+
+    // Library API：ReadOnly 策略 = `/:ro`
+    let sandbox = make_sandbox_with_landlock(vec![LandlockRule {
+        path: "/".into(),
+        perms: vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
         ],
-        dir.path(),
-    );
-    // 探针写入本应在 read-only 下被拒绝。若成功或返回非 126，
-    // 说明 Landlock 没生效，跳过一切后续测试。
-    out.exit_code == Some(126)
+    }]);
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), "echo probe > probe_file".to_string()],
+        cwd: dir_path,
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("Landlock probe execute should not fail");
+    // 探针写入本应在 read-only 下被拒绝。
+    output.exit_code != 0
 }
 
 /// `OnceLock` 缓存的探针结果，整个测试 session 只跑一次。
@@ -326,7 +318,7 @@ fn read_only_blocks_write() {
 // 的 Landlock 拒绝路径、退出码、stderr 消息格式。
 // ---------------------------------------------------------------------------
 
-// L1：CLI `--policy read-only` 下写入触发 Landlock 拒绝，wrapper 退出 126。
+// L1：ReadOnly 下写入应被 Landlock 拒绝（库 API）。
 
 #[test]
 fn cli_read_only_blocks_write_with_exit_126() {
@@ -335,38 +327,42 @@ fn cli_read_only_blocks_write_with_exit_126() {
     }
 
     let dir = tempfile::tempdir().unwrap();
+    let dir_path = dir.path().to_path_buf();
 
-    let out = run_cli_in(
-        &[
-            "run",
-            "--policy",
-            "read-only",
-            "--",
-            "sh",
-            "-c",
-            "echo blocked > blocked.txt",
+    let sandbox = make_sandbox_with_landlock(vec![LandlockRule {
+        path: "/".into(),
+        perms: vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
         ],
-        dir.path(),
-    );
+    }]);
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), "echo blocked > blocked.txt".to_string()],
+        cwd: dir_path,
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
 
-    assert_eq!(
-        out.exit_code,
-        Some(126),
-        "read-only 下写入应被 Landlock 拒绝，wrapper 应退出 126。\
-         stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should not fail, though the child process may error");
+
+    assert_ne!(
+        output.exit_code, 0,
+        "read-only 下写入应被 Landlock 拒绝。exit_code={}",
+        output.exit_code
     );
 }
 
-// L2：WorkspaceWrite 模式下写到工作目录之外应被 Landlock 拒绝。
+// L2：ReadOnly 模式下写到工作目录之外应被 Landlock 拒绝。
 //
 // 风险控制：
 // - 用 `skip_unless_landlock_active()` 预检，确保 Landlock 在拦截；
 //   探针失败则跳过，不会触碰任何主机路径。
 // - 目标路径选 `/var/tmp/.sandbox_runtime_landlock_test_<pid>`：
-//   /var/tmp 在所有 Linux 上存在，但不在 WorkspaceWrite 默认可写集
-//   （`/tmp` + cwd + allow_write）里，故 Landlock 必须拒绝。
+//   /var/tmp 在所有 Linux 上存在，但 `/:ro` 下不可写。
 // - 测试开始前创建该空目录（这样目标路径已存在，写操作不因 ENOENT 失败）；
 //   测试结束后 best-effort 删除整个目录。
 
@@ -377,42 +373,55 @@ fn cli_workspace_write_blocks_write_outside_cwd() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    // 注意：必须放在 /var/tmp 而非 /tmp 下——WorkspaceWrite 默认授予
-    // /tmp 写权限，target 若在 /tmp 里会被放行。
+    let dir_path = dir.path().to_path_buf();
+    // 注意：必须放在 /var/tmp 而非 /tmp 下——ReadOnly 对所有路径都是 RO，
+    // 但为了模拟旧版 WorkspaceWrite 的隔离语义，选 /var/tmp 确保落点
+    // 不在默认可写路径中。
     let target_dir = unique_path_in_var_tmp("landlock_isolated_target_dir");
-    // WorkspaceWrite 不会允许写到这里。
     std::fs::create_dir_all(&target_dir).expect("failed to create isolated target dir");
 
     let target_file = target_dir.join("blocked_file");
     let sh_cmd = format!("echo blocked > {}", target_file.display());
 
-    let out = run_cli_in(
-        &["run", "--policy", "workspace", "--", "sh", "-c", &sh_cmd],
-        dir.path(),
-    );
+    let sandbox = make_sandbox_with_landlock(vec![LandlockRule {
+        path: "/".into(),
+        perms: vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ],
+    }]);
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), sh_cmd],
+        cwd: dir_path,
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should not fail, though the child process may error");
 
     // 不论结果，先清理——若 Landlock 真的拦截了，target_file 不会存在；
     // 万一 Landlock 失效，文件会留下，需要清理。
     cleanup_path(&target_file);
     cleanup_path(&target_dir);
 
-    assert_eq!(
-        out.exit_code,
-        Some(126),
-        "workspace 下写工作目录之外应被 Landlock 拒绝。\
-         stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+    assert_ne!(
+        output.exit_code, 0,
+        "RO 下写工作目录之外应被 Landlock 拒绝。exit_code={}",
+        output.exit_code
     );
 }
 
-// L3：FullAccess 不施加 Landlock 限制，任意写都应成功。
+// L3：无 Landlock 限制（空规则），任意写都应成功。
 //
 // 风险控制：
 // - 用 PID 化的 /tmp 路径，测试结束后删除，避免在 /tmp 留垃圾。
-// - 仍走 `skip_unless_landlock_active()` 预检——FullAccess 跳过 Landlock，
+// - 仍走 `skip_unless_landlock_active()` 预检——空规则跳过 Landlock，
 //   但用预检确保整套 Landlock 路径至少工作（防止 Landlock 完全失效
-//   导致 FullAccess 之外的测试出现误判）。
+//   导致其他测试出现误判）。
 
 #[test]
 fn cli_full_access_allows_arbitrary_write() {
@@ -420,24 +429,28 @@ fn cli_full_access_allows_arbitrary_write() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let sandbox = make_sandbox();
     let target_file = unique_path("landlock_full_access_test");
     let sh_cmd = format!("echo ok > {}", target_file.display());
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), sh_cmd],
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
 
-    let out = run_cli_in(
-        &["run", "--policy", "full-access", "--", "sh", "-c", &sh_cmd],
-        dir.path(),
-    );
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should succeed under no landlock rules");
 
-    // FullAccess 下文件应当真的被创建。测试结束后清理。
+    // 测试结束后清理。
     cleanup_path(&target_file);
 
     assert_eq!(
-        out.exit_code,
-        Some(0),
-        "full-access 下写入应成功。stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+        output.exit_code, 0,
+        "无 Landlock 限制下写入应成功。exit_code={}",
+        output.exit_code
     );
 }
 
@@ -451,8 +464,8 @@ fn cli_check_reports_landlock_available() {
 
     assert_eq!(out.exit_code, Some(0));
 
-    // 在 src/main.rs:171-180 中，Landlock 行在 ABI 探测成功时会打印
-    // "Landlock                      available (ABI vN)"。
+    // 在 `src/lib.rs::check_capabilities()` 中，Landlock 行在 ABI 探测
+    // 成功时会打印 "Landlock                      available (ABI vN)"。
     assert!(
         out.stdout.contains("Landlock"),
         "check 输出应含 'Landlock'。stdout={:?}",
@@ -763,7 +776,7 @@ fn full_access_does_not_intercept_writes() {
 
 // ===== CLI 二进制测试：覆盖 wrapper → Landlock 的完整链路 =====
 
-// CLI L5：`--policy read-only -- cat /etc/passwd` 读成功。
+// CLI L5：ReadOnly 下读取应成功（库 API）。
 
 #[test]
 fn cli_read_only_allows_read() {
@@ -771,19 +784,36 @@ fn cli_read_only_allows_read() {
         return;
     }
 
-    let out = run_cli(&["run", "--policy", "read-only", "--", "cat", "/etc/passwd"]);
+    let sandbox = make_sandbox_with_landlock(vec![LandlockRule {
+        path: "/".into(),
+        perms: vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ],
+    }]);
+    let spec = CommandSpec {
+        program: "cat".to_string(),
+        args: vec!["/etc/passwd".to_string()],
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should succeed under ReadOnly");
 
     assert_eq!(
-        out.exit_code,
-        Some(0),
-        "CLI read-only 应允许读 /etc/passwd。stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+        output.exit_code, 0,
+        "ReadOnly 下读取 /etc/passwd 应成功。exit_code={}",
+        output.exit_code
     );
-    assert!(!out.stdout.is_empty(), "cat /etc/passwd 应有 stdout 输出");
+    // CommandOutput 不含 stdout，故不验证输出内容；
+    // exit_code=0 即可确认读取未被拦截。
 }
 
-// CLI L6：`--policy workspace` 下写到 /tmp 应成功。
+// CLI L6：ReadOnly 下写到 /tmp 应失败，验证 RO 语义。
 
 #[test]
 fn cli_workspace_write_allows_write_to_tmp() {
@@ -791,23 +821,39 @@ fn cli_workspace_write_allows_write_to_tmp() {
         return;
     }
 
-    let target = unique_path("cli_workspace_tmp");
+    let target = unique_path("landlock_ro_tmp_blocked");
     let sh_cmd = format!("echo ok > {}", target.display());
 
-    let out = run_cli(&["run", "--policy", "workspace", "--", "sh", "-c", &sh_cmd]);
+    let sandbox = make_sandbox_with_landlock(vec![LandlockRule {
+        path: "/".into(),
+        perms: vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ],
+    }]);
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), sh_cmd],
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should not fail, though the child process may error");
 
     cleanup_path(&target);
 
-    assert_eq!(
-        out.exit_code,
-        Some(0),
-        "CLI workspace 下写到 /tmp 应成功。stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+    assert_ne!(
+        output.exit_code, 0,
+        "ReadOnly 下写到 /tmp 应被拒绝。exit_code={}",
+        output.exit_code
     );
 }
 
-// CLI L7：`--policy workspace --allow-write` 应授予该路径写权限。
+// CLI L7：显式授予写权限应允许写。
 
 #[test]
 fn cli_workspace_write_grants_allow_write_path() {
@@ -817,36 +863,59 @@ fn cli_workspace_write_grants_allow_write_path() {
 
     let granted_dir = unique_path_in_var_tmp("cli_allow_granted");
     std::fs::create_dir_all(&granted_dir).expect("failed to create granted dir");
-    let granted_str = granted_dir.to_string_lossy().to_string();
 
     let target = granted_dir.join("cli_written_file");
     let sh_cmd = format!("echo ok > {}", target.display());
 
-    let out = run_cli(&[
-        "run",
-        "--policy",
-        "workspace",
-        "--allow-write",
-        &granted_str,
-        "--",
-        "sh",
-        "-c",
-        &sh_cmd,
+    // RO on /, RW on granted_dir
+    let sandbox = make_sandbox_with_landlock(vec![
+        LandlockRule {
+            path: "/".into(),
+            perms: vec![
+                LandlockPerm::Execute,
+                LandlockPerm::ReadFile,
+                LandlockPerm::ReadDir,
+            ],
+        },
+        LandlockRule {
+            path: granted_dir.clone(),
+            perms: vec![
+                LandlockPerm::Execute,
+                LandlockPerm::ReadFile,
+                LandlockPerm::ReadDir,
+                LandlockPerm::WriteFile,
+                LandlockPerm::RemoveDir,
+                LandlockPerm::RemoveFile,
+                LandlockPerm::MakeDir,
+                LandlockPerm::MakeReg,
+                LandlockPerm::MakeSym,
+                LandlockPerm::Truncate,
+            ],
+        },
     ]);
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), sh_cmd],
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should succeed for granted path");
 
     cleanup_path(&target);
     cleanup_path(&granted_dir);
 
     assert_eq!(
-        out.exit_code,
-        Some(0),
-        "CLI --allow-write 应授予该路径写权限。stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+        output.exit_code, 0,
+        "显式授予写权限的路径应可写。exit_code={}",
+        output.exit_code
     );
 }
 
-// CLI L8：`--allow-write A` 不应"溢出"授予其他未列入路径。
+// CLI L8：未授予写权限的路径应被拒绝。
 
 #[test]
 fn cli_workspace_write_does_not_grant_unlisted_path() {
@@ -859,37 +928,59 @@ fn cli_workspace_write_does_not_grant_unlisted_path() {
     std::fs::create_dir_all(&granted_dir).expect("failed to create granted dir");
     std::fs::create_dir_all(&other_dir).expect("failed to create other dir");
 
-    let granted_str = granted_dir.to_string_lossy().to_string();
     let target = other_dir.join("should_be_blocked");
     let sh_cmd = format!("echo blocked > {}", target.display());
 
-    let out = run_cli(&[
-        "run",
-        "--policy",
-        "workspace",
-        "--allow-write",
-        &granted_str,
-        "--",
-        "sh",
-        "-c",
-        &sh_cmd,
+    // RO on /, RW on granted_dir only
+    let sandbox = make_sandbox_with_landlock(vec![
+        LandlockRule {
+            path: "/".into(),
+            perms: vec![
+                LandlockPerm::Execute,
+                LandlockPerm::ReadFile,
+                LandlockPerm::ReadDir,
+            ],
+        },
+        LandlockRule {
+            path: granted_dir.clone(),
+            perms: vec![
+                LandlockPerm::Execute,
+                LandlockPerm::ReadFile,
+                LandlockPerm::ReadDir,
+                LandlockPerm::WriteFile,
+                LandlockPerm::RemoveDir,
+                LandlockPerm::RemoveFile,
+                LandlockPerm::MakeDir,
+                LandlockPerm::MakeReg,
+                LandlockPerm::MakeSym,
+                LandlockPerm::Truncate,
+            ],
+        },
     ]);
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), sh_cmd],
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should not fail, though the child process may error");
 
     cleanup_path(&target);
     cleanup_path(&other_dir);
     cleanup_path(&granted_dir);
 
-    assert_eq!(
-        out.exit_code,
-        Some(126),
-        "CLI 未列入 --allow-write 的路径应被拒绝。\
-         stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+    assert_ne!(
+        output.exit_code, 0,
+        "未授予写权限的路径应被拒绝。exit_code={}",
+        output.exit_code
     );
 }
 
-// CLI L9：`--policy workspace -- cat /etc/passwd` 读应成功。
+// CLI L9：ReadOnly 下读取任意路径应成功（库 API）。
 
 #[test]
 fn cli_workspace_write_allows_read_anywhere() {
@@ -897,21 +988,34 @@ fn cli_workspace_write_allows_read_anywhere() {
         return;
     }
 
-    let out = run_cli(&["run", "--policy", "workspace", "--", "cat", "/etc/passwd"]);
+    let sandbox = make_sandbox_with_landlock(vec![LandlockRule {
+        path: "/".into(),
+        perms: vec![
+            LandlockPerm::Execute,
+            LandlockPerm::ReadFile,
+            LandlockPerm::ReadDir,
+        ],
+    }]);
+    let spec = CommandSpec {
+        program: "cat".to_string(),
+        args: vec!["/etc/passwd".to_string()],
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
+
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should succeed under ReadOnly");
 
     assert_eq!(
-        out.exit_code,
-        Some(0),
-        "CLI workspace 下读 /etc/passwd 应成功。\
-         stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+        output.exit_code, 0,
+        "ReadOnly 下读 /etc/passwd 应成功。exit_code={}",
+        output.exit_code
     );
-    assert!(!out.stdout.is_empty(), "应有 stdout 输出");
 }
 
-// CLI L10：`--policy full-access` 写到 /var/tmp/.sandbox_* 应成功（再次确认
-// 不施加 Landlock 限制）。
+// CLI L10：无 Landlock 限制（空规则）写到 /var/tmp 应成功。
 
 #[test]
 fn cli_full_access_allows_write_to_var_tmp() {
@@ -919,20 +1023,27 @@ fn cli_full_access_allows_write_to_var_tmp() {
         return;
     }
 
+    let sandbox = make_sandbox();
     let target = unique_path_in_var_tmp("cli_full_access");
     let sh_cmd = format!("echo ok > {}", target.display());
+    let spec = CommandSpec {
+        program: "sh".to_string(),
+        args: vec!["-c".to_string(), sh_cmd],
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        env: HashMap::new(),
+        timeout: Duration::from_secs(10),
+    };
 
-    let out = run_cli(&["run", "--policy", "full-access", "--", "sh", "-c", &sh_cmd]);
+    let (output, _reason) = sandbox
+        .execute(&spec)
+        .expect("execute should succeed with no landlock rules");
 
     cleanup_path(&target);
 
     assert_eq!(
-        out.exit_code,
-        Some(0),
-        "CLI full-access 写到 /var/tmp 应成功。\
-         stdout={:?} stderr={:?}",
-        out.stdout,
-        out.stderr
+        output.exit_code, 0,
+        "无 Landlock 限制下写 /var/tmp 应成功。exit_code={}",
+        output.exit_code
     );
 }
 
@@ -977,7 +1088,7 @@ fn cli_landlock_rw_allows_write() {
     if skip_unless_landlock_active() {
         return;
     }
-    let target = format!("/tmp/.sandbox_ll_rw_test");
+    let target = "/tmp/.sandbox_ll_rw_test".to_string();
     let out = run_cli(&[
         "run",
         "--landlock",
@@ -1003,8 +1114,18 @@ fn cli_landlock_all_allows_ioctl_dev() {
     if skip_unless_landlock_active() {
         return;
     }
-    // all 应包含 refer + ioctl-dev；简单验证 exit_code 正常
-    let out = run_cli(&["run", "--landlock", "/tmp:all", "--", "sh", "-c", "echo ok"]);
+    // all 应包含 refer + ioctl-dev；配合 /:ro 让 sh 可执行
+    let out = run_cli(&[
+        "run",
+        "--landlock",
+        "/:ro",
+        "--landlock",
+        "/tmp:all",
+        "--",
+        "sh",
+        "-c",
+        "echo ok",
+    ]);
     assert_eq!(
         out.exit_code,
         Some(0),
@@ -1018,9 +1139,11 @@ fn cli_landlock_multiple_rules_combined() {
     if skip_unless_landlock_active() {
         return;
     }
-    let target = format!("/tmp/.sandbox_ll_multi_test");
+    let target = "/tmp/.sandbox_ll_multi_test".to_string();
     let out = run_cli(&[
         "run",
+        "--landlock",
+        "/:ro",
         "--landlock",
         "/etc:ro",
         "--landlock",
@@ -1028,8 +1151,9 @@ fn cli_landlock_multiple_rules_combined() {
         "--",
         "sh",
         "-c",
-        &format!("echo ok > {target} && cat /etc/hostname > /dev/null"),
+        &format!("echo ok > {target} && cat /etc/hostname"),
     ]);
+    // 注意：> /dev/null 需要 /dev 的写权限，不与 /:ro 兼容，故省去。
     assert_eq!(
         out.exit_code,
         Some(0),

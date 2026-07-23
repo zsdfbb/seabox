@@ -280,9 +280,9 @@ pub struct CommandSpec {
 pub struct CommandOutput {
     /// 命令的退出码。
     pub exit_code: i32,
-    /// 若子进程被 seccomp 黑名单命中后被 SIGSYS 杀死，
-    /// 从 `/proc/<pid>/syscall` post-mortem 读取到的
-    /// `(syscall_nr, arch)`。`None` 表示未被拦截或读取失败。
+    /// 若黑名单 syscall 被 seccomp USER_NOTIF 拦截，由 worker 线程
+    /// 通过 listener fd 上报的 `(syscall_nr, arch)`。
+    /// `None` 表示未被拦截。
     pub blocked_syscall: Option<(u32, u32)>,
 }
 
@@ -301,8 +301,8 @@ trait SandboxImpl: Send + Sync {
     /// 将已完成命令的退出码归类为一个 [`ExitReason`]，
     /// 区分沙箱拒绝（Landlock、seccomp 等）、正常程序退出与内部错误。
     ///
-    /// `blocked` 仅在 seccomp 命中黑名单（子进程被 SIGSYS 杀死）时有值，
-    /// 由实现从 `/proc/<pid>/syscall` post-mortem 读取。
+    /// `blocked` 仅在 seccomp 黑名单被 USER_NOTIF 拦截时有值，
+    /// 由实现从 worker 线程上报的 listener fd 读取 `(nr, arch)`。
     fn classify_exit(&self, exit_code: i32, blocked: Option<(u32, u32)>) -> ExitReason;
 }
 

@@ -15,7 +15,7 @@
 //! # 拦截 → 通知流程
 //!
 //! 1. **父进程** 调用 [`build_blacklist_filter`] 生成 BPF。
-//! 2. **子进程** 在 `pre_exec` 中调用 [`install_user_notif_filter`]，
+//! 2. **子进程**（fork 后 exec 前）调用 [`install_user_notif_filter`]，
 //!    传入 BPF filter。该函数通过 `seccomp(2)` 系统调用加载 filter 并
 //!    同时返回一个 listener fd（`SECCOMP_FILTER_FLAG_NEW_LISTENER`）。
 //! 3. 子进程把这个 listener fd 通过 `sendmsg(SCM_RIGHTS)` 发送给父进程。

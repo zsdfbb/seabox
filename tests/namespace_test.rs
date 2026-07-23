@@ -80,6 +80,7 @@ fn skip_if_no_net_ns() -> bool {
     false
 }
 
+#[allow(dead_code)]
 fn skip_if_no_pid_ns() -> bool {
     if !namespaces::is_pid_namespace_available() {
         eprintln!("pid namespace not available, skipping test");
@@ -96,6 +97,7 @@ fn skip_if_no_uts_ns() -> bool {
     false
 }
 
+#[allow(dead_code)]
 fn skip_if_no_ipc_ns() -> bool {
     if !namespaces::is_ipc_namespace_available() {
         eprintln!("ipc namespace not available, skipping test");
@@ -104,6 +106,7 @@ fn skip_if_no_ipc_ns() -> bool {
     false
 }
 
+#[allow(dead_code)]
 fn skip_if_no_cgroup_ns() -> bool {
     if !namespaces::is_cgroup_namespace_available() {
         eprintln!("cgroup namespace not available, skipping test");

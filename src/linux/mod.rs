@@ -30,9 +30,9 @@
 //! 6. **父进程** 在 reap 时从 `siginfo` 拿到 exit_code / 退出原因。
 //! 7. **关键**：USER_NOTIF 下子进程通常**不会**被信号杀死，进程收到
 //!    EPERM 后继续运行并以正常 exit_code 退出（多数 syscall_probe 会
-//!    自行返回 0）。`execute` 把 `(nr, arch)` 编码为 `BLOCKED_MARKER`
-//!    行追加到 `CommandOutput::stderr`；`classify_exit` 解析该标记以
-//!    在 exit_code=0 的情况下仍然把命令归类为 `Denied { Seccomp }`。
+//!    自行返回 0）。worker 线程把 `(nr, arch)` 写入共享
+//!    `Arc<Mutex<Option<(nr, arch)>>>`，`execute` 返回后 `classify_exit`
+//!    读取该值，在 exit_code=0 的情况下仍然把命令归类为 `Denied { Seccomp }`。
 
 pub mod landlock;
 pub mod namespaces;
@@ -88,9 +88,9 @@ impl SandboxImpl for LinuxSandbox {
     /// 在沙箱内执行一条命令。
     ///
     /// 在**父进程**中构建 Landlock 规则集与 seccomp BPF filter，
-    /// 然后在**子进程**中通过 `pre_exec` 闭包（零分配上下文）施加两者，
-    /// 并通过 `SECCOMP_RET_USER_NOTIF` 把拦截事件转发到父进程侧的
-    /// listener fd，由 worker 线程处理后填入 `BLOCKED_MARKER`。
+    /// 然后在 `fork()` 后的**子进程**中依次施加命名空间隔离、Landlock ACL、
+    /// seccomp BPF filter，并通过 `SECCOMP_RET_USER_NOTIF` 将拦截事件转发到
+    /// listener fd，由父进程 worker 线程处理后写入共享 `blocked` 变量。
     fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput> {
         // ── 步骤 1：构建 Landlock 规则集并取出其 fd ────────────────────
         let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd()?;
@@ -496,8 +496,10 @@ impl LinuxSandbox {
 // socketpair + SCM_RIGHTS helpers
 // ---------------------------------------------------------------------------
 
-/// 创建 `socketpair(AF_UNIX, SOCK_SEQPACKET, 0)` 并返回父端 `OwnedFd` 与
-/// 子端原始 fd（i32，由调用方在 pre_exec 中显式 close）。
+/// 创建 `socketpair(AF_UNIX, SOCK_SEQPACKET, 0)` 并返回两端 `OwnedFd`。
+///
+/// 调用方在 fork 后需手动关闭子进程继承的父端（通过其 raw fd），
+/// 子端在子进程完成 `sendmsg(SCM_RIGHTS)` 后显式 `libc::close`。
 ///
 /// # 错误
 ///
@@ -670,19 +672,6 @@ impl UserNotifHandle {
     }
 }
 
-/// Spawn worker 线程，负责响应 seccomp USER_NOTIF 通知。
-///
-/// # 参数
-///
-/// * `parent_sock_raw` —— socketpair 父端的 raw fd（pre_exec 中子进程
-///   通过 `sendmsg(SCM_RIGHTS)` 把 listener fd 发到这里）。worker 在
-///   自己闭包里调用 `recv_fd(parent_sock_raw)` 拿 listener。
-/// * `blocked` —— 共享 `(nr, arch)` 状态；worker 把每次拦截的 syscall
-///   信息写进去，主线程在 `waitid` 后读。
-///
-/// worker 在 `poll(listener_fd, -1)` 中等待 notification 或 POLLHUP。
-/// 子进程退出 → listener fd POLLHUP → worker 自然退出。
-///
 /// PID namespace 的 init 进程（reaper）。
 ///
 /// 循环 `waitpid(-1)` 收割所有子进程和托孤进程。
@@ -714,6 +703,18 @@ fn do_reaper(business_pid: libc::pid_t) -> i32 {
     }
 }
 
+/// Spawn worker 线程，负责响应 seccomp USER_NOTIF 通知。
+///
+/// # 参数
+///
+/// * `parent_sock_raw` —— socketpair 父端的 raw fd。fork 后子进程
+///   通过 `sendmsg(SCM_RIGHTS)` 把 listener fd 发到这里。worker 在
+///   自己闭包里调用 `recv_fd(parent_sock_raw)` 拿 listener。
+/// * `blocked` —— 共享 `(nr, arch)` 状态；worker 把每次拦截的 syscall
+///   信息写进去，主线程在 `waitpid` 后读。
+///
+/// worker 在 `poll(listener_fd, -1)` 中等待 notification 或 POLLHUP。
+/// 子进程退出 → listener fd POLLHUP → worker 自然退出。
 fn spawn_user_notif_worker(
     parent_sock_raw: RawFd,
     blocked: &std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>,
