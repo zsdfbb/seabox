@@ -93,6 +93,14 @@ enum Cli {
         #[arg(long)]
         unsetenv: Vec<String>,
 
+        /// 命令超时秒数（默认 30，不超过 --timeout-max）
+        #[arg(long)]
+        timeout: Option<u64>,
+
+        /// 命令超时上限秒数（仅 config 层，影响默认值上限）
+        #[arg(long)]
+        timeout_max: Option<u64>,
+
         /// 清空环境变量
         #[arg(long)]
         clearenv: bool,
@@ -142,6 +150,8 @@ fn main() -> anyhow::Result<()> {
             env: env_vars,
             unsetenv,
             clearenv,
+            timeout,
+            timeout_max,
         } => cmd_run(
             landlock,
             allow_network,
@@ -163,6 +173,8 @@ fn main() -> anyhow::Result<()> {
             env_vars,
             unsetenv,
             clearenv,
+            timeout,
+            timeout_max,
         ),
         Cli::Check => cmd_check(),
         Cli::Serve { port } => cmd_serve(port),
@@ -196,6 +208,8 @@ fn cmd_run(
     env_vars: Vec<(String, String)>,
     unsetenv: Vec<String>,
     clearenv: bool,
+    timeout: Option<u64>,
+    timeout_max: Option<u64>,
 ) -> anyhow::Result<()> {
     if command.is_empty() {
         anyhow::bail!(
@@ -232,9 +246,15 @@ fn cmd_run(
         uid,
         gid,
         hostname,
+        timeout_max,
     )?;
 
-    let timeout = Duration::from_secs(config.timeout_default_secs);
+    // --timeout SECS 覆盖默认值，但不允许超过 timeout_max_secs
+    let timeout_secs = match timeout {
+        Some(s) => s.min(config.timeout_max_secs),
+        None => config.timeout_default_secs,
+    };
+    let timeout = Duration::from_secs(timeout_secs);
     let sandbox = Sandbox::from_config(config)?;
 
     let program = command[0].clone();
@@ -327,6 +347,7 @@ fn build_config(
     uid: Option<u32>,
     gid: Option<u32>,
     hostname: Option<String>,
+    timeout_max: Option<u64>,
 ) -> anyhow::Result<SandboxConfig> {
     let rules = landlock
         .iter()
@@ -355,6 +376,6 @@ fn build_config(
         },
         network_enabled: allow_network,
         timeout_default_secs: 30,
-        timeout_max_secs: 300,
+        timeout_max_secs: timeout_max.unwrap_or(300),
     })
 }
