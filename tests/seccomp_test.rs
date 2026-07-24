@@ -56,20 +56,11 @@ use std::sync::OnceLock;
 use sandbox_runtime::linux::seccomp;
 use sandbox_runtime::linux::seccomp::is_available as seccomp_is_available;
 
-/// 通过 syscall 号查名（不再维护镜像表）。
+/// 通过 syscall 号查名。
 #[allow(dead_code)]
 fn syscall_name_for_test(nr: &str) -> &'static str {
     let n: u32 = nr.parse().expect("invalid nr");
     seccomp::syscall_name(n).unwrap_or_else(|| panic!("unknown syscall nr in test: {nr}"))
-}
-
-/// 通过 syscall 号查 category tag。
-#[allow(dead_code)]
-fn category_for_test(nr: &str) -> &'static str {
-    let name = syscall_name_for_test(nr);
-    seccomp::syscall_by_name(name)
-        .map(|s| s.category.tag())
-        .unwrap_or("unknown")
 }
 
 // ---------------------------------------------------------------------------
@@ -562,4 +553,158 @@ fn normal_exit_does_not_hang_worker() {
     );
 
     // 3. exit_code 0 已确认无拒绝，无需额外 stderr 检查
+}
+
+// ---------------------------------------------------------------------------
+// --seccomp-deny-nr 端到端测试
+// ---------------------------------------------------------------------------
+
+/// 用 `--seccomp-deny-nr` 指定 syscall 号后调用 syscall_probe 触发，
+/// 断言 wrapper 退出 126（Denied { Seccomp }）。
+fn assert_deny_nr_blocked(deny_nrs: &[&str], probe_nr: &str, probe_args: &[&str]) {
+    let mut args: Vec<&str> = vec!["run"];
+    for nr in deny_nrs {
+        args.push("--seccomp-deny-nr");
+        args.push(nr);
+    }
+    args.push("--");
+    args.push(syscall_probe_bin());
+    args.push(probe_nr);
+    args.extend_from_slice(probe_args);
+
+    let out = run_cli(&args);
+
+    assert_eq!(
+        out.exit_code,
+        Some(126),
+        "--seccomp-deny-nr 应拦截 syscall {probe_nr}，wrapper 应退出 126。\
+         stdout={:?} stderr={:?}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("Blocked by seccomp filter"),
+        "stderr 应含拒绝消息。stderr={:?}",
+        out.stderr
+    );
+}
+
+/// mount(165) 被 `--seccomp-deny-nr 165` 拦截。
+#[test]
+fn deny_nr_blocks_mount() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    assert_deny_nr_blocked(&["165"], mount_nr(), &["0", "0", "0", "0", "0", "0"]);
+}
+
+/// unshare(97) 被 `--seccomp-deny-nr 97` 拦截。
+#[test]
+fn deny_nr_blocks_unshare() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    assert_deny_nr_blocked(&["97"], unshare_nr(), &["0"]);
+}
+
+/// reboot(169) 被 `--seccomp-deny-nr 169` 拦截。
+#[test]
+fn deny_nr_blocks_reboot() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    assert_deny_nr_blocked(&["169"], reboot_nr(), &["0", "0", "0", "0"]);
+}
+
+/// 同时指定多个 `--seccomp-deny-nr`，mount 和 unshare 都被拦截。
+#[test]
+fn deny_nr_multiple_blocks_both() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    // mount 被拦截
+    assert_deny_nr_blocked(
+        &["165", "97"],
+        mount_nr(),
+        &["0", "0", "0", "0", "0", "0"],
+    );
+    // unshare 也被拦截
+    assert_deny_nr_blocked(&["165", "97"], unshare_nr(), &["0"]);
+}
+
+/// 不在 deny 列表中的 syscall 正常放行。
+#[test]
+fn deny_nr_allows_non_denied() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    let out = run_cli(&[
+        "run",
+        "--seccomp-deny-nr",
+        "165",
+        "--",
+        syscall_probe_bin(),
+        bpf_nr(), // bpf(357) 不在 deny 列表
+        "0",
+        "0",
+        "0",
+    ]);
+    // bpf 不被拦截，进程因参数无效返回错误（exit 非 126）
+    assert_ne!(
+        out.exit_code,
+        Some(126),
+        "bpf 不应在 deny 列表中被拦截。stderr={:?}",
+        out.stderr
+    );
+}
+
+/// 无 seccomp 参数时，mount 不被 seccomp 拦截（退出码非 126）。
+#[test]
+fn no_deny_nr_does_not_block_mount() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    let out = run_cli(&[
+        "run",
+        "--",
+        syscall_probe_bin(),
+        mount_nr(),
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+    ]);
+    // 无 seccomp filter → mount 不被拦截（exit 是内核 EPERM=101，非 126）
+    assert_ne!(
+        out.exit_code,
+        Some(126),
+        "无 --seccomp-deny-nr 时 mount 不应被 seccomp 拦截。stderr={:?}",
+        out.stderr
+    );
+}
+
+/// 指定 `--seccomp-deny-nr` 但执行正常命令（/bin/true），应正常退出 0。
+#[test]
+fn deny_nr_normal_command_succeeds() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    let true_path = if std::path::Path::new("/bin/true").exists() {
+        "/bin/true"
+    } else if std::path::Path::new("/usr/bin/true").exists() {
+        "/usr/bin/true"
+    } else {
+        eprintln!("skipping: no /bin/true");
+        return;
+    };
+
+    let out = run_cli(&["run", "--seccomp-deny-nr", "165", "--", true_path]);
+    assert_eq!(
+        out.exit_code,
+        Some(0),
+        "/bin/true 不调用 mount，应正常退出 0。stderr={:?}",
+        out.stderr
+    );
 }

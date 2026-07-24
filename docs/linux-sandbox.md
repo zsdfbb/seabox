@@ -32,31 +32,74 @@
 
 运行时在 `get_abi_version()` 中通过 `CompatLevel::HardRequirement` 从 ABI v7 向下探测。
 
-## Seccomp 黑名单
+## Seccomp（动态策略）
 
-13 个被拦截的 syscall，按分类：
+seccomp 策略完全由用户驱动，不设默认黑名单。
 
-| 分类 | syscall | x86_64 nr | aarch64 nr |
+### CLI 接口
+
+```
+# USER_NOTIF 拦截指定 syscall（精确诊断）
+sandbox-runtime run --seccomp-deny-nr 165 -- ls
+
+# 外部 cBPF 堆叠（prctl 直装，无诊断）
+sandbox-runtime run --seccomp-filter-fd 3 -- ls 3< block.bpf
+
+# 混合：内部 deny 兜底 + 外部 BPF 收紧
+sandbox-runtime run --seccomp-deny-nr 165 --seccomp-filter-fd 3 -- ls 3< extra.bpf
+
+# 不传 seccomp 参数 → 不装任何 filter
+```
+
+### 三条执行路径
+
+| 条件 | 路径 | 安装方式 | 诊断 |
 |---|---|---|---|
-| `mount`（文件系统挂载） | mount, umount2, pivot_root, chroot | 165/166/155/161 | 40/39/41/51 |
-| `debug`（调试跟踪） | ptrace | 101 | 117 |
-| `boot`（重启/内核加载） | kexec_load, kexec_file_load, reboot | 246/320/169 | 104/294/142 |
-| `module`（内核模块） | init_module, finit_module, delete_module | 175/313/176 | 105/106/107 |
-| `namespace`（命名空间逃逸） | unshare | 97 | 97 |
-| `bpf`（额外 BPF 加载） | bpf | 357 | 280 |
+| `--seccomp-deny-nr` 非空 | A | NEW_LISTENER + USER_NOTIF | ✅ 精确到 nr/arch |
+| 仅 `--seccomp-filter-fd` | B | prctl 直装 | ❌ 无 |
+| 无 seccomp 参数 | C | 不装 filter | — |
 
-### 拦截机制
+### 路径 A：USER_NOTIF（有诊断）
 
-采用 `SECCOMP_RET_USER_NOTIF`（非传统 SIGSYS），流程：
-
-1. 父进程构建 BPF filter（n+6 条指令）
-2. 子进程在 `pre_exec` 中加载 filter 并取得 listener fd
+1. 父进程构建 deny filter（n+6 条 BPF 指令）
+2. 子进程加载 deny filter（NEW_LISTENER）并取得 listener fd
 3. listener fd 通过 `sendmsg(SCM_RIGHTS)` 传回父进程
-4. 父进程 worker 线程在 `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 上阻塞等待
-5. 命中黑名单时，worker 读取 `(nr, arch)` 并回复 `EPERM`
-6. 子进程以 EPERM 返回，继续运行并正常退出
+4. 子进程继续安装外部 BPF（如有）
+5. 父进程 worker 线程在 `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 上阻塞等待
+6. 命中时，worker 读取 `(nr, arch)` 并回复 `EPERM`
+7. 子进程以 EPERM 返回，继续运行并正常退出
 
-拒绝消息格式：`Blocked by seccomp filter (SIGSYS): syscall='mount' category='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS`
+拒绝消息格式：`Blocked by seccomp filter (SIGSYS): syscall='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS`
+
+### 路径 B：外部 BPF（无诊断）
+
+- 子进程通过 `prctl(PR_SET_SECCOMP)` 直装外部 BPF
+- 无 socketpair、无 worker 线程
+- 外部 BPF 的行为完全由其作者决定
+
+### 多 filter 堆叠
+
+多个 `--seccomp-filter-fd` 按顺序安装，内核按逆序评估（后装先查）。外部 BPF 只能进一步收紧，不能放行内部 deny 拦掉的 syscall。
+
+### 已知 syscall 诊断查表
+
+`SYSCALLS` 表保留用于 `syscall_name()` 诊断查表：
+
+| syscall | x86_64 nr | aarch64 nr |
+|---|---|---|
+| mount | 165 | 40 |
+| umount2 | 166 | 39 |
+| pivot_root | 155 | 41 |
+| chroot | 161 | 51 |
+| ptrace | 101 | 117 |
+| kexec_load | 246 | 104 |
+| kexec_file_load | 320 | 294 |
+| reboot | 169 | 142 |
+| init_module | 175 | 105 |
+| finit_module | 313 | 106 |
+| delete_module | 176 | 107 |
+| unshare | 97 | 97 |
+| bpf | 357 | 280 |
 
 ## 命名空间支持
 

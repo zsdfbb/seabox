@@ -86,8 +86,8 @@ fn exit_139_sigsegv() {
 // rich 路径：exit_code 159 + /proc peek 拿到 (nr, arch) → 富消息分支
 // ---------------------------------------------------------------------------
 
-/// 当 `/proc/<pid>/syscall` 在 SIGSYS 后被正确读取，wrapper 必须解出
-/// syscall 名 / category tag / nr / arch，而不是落到 fallback。
+/// 当 blocked (nr, arch) 有值时，wrapper 必须解出 syscall 名 / nr / arch，
+/// 而不是落到 fallback。
 #[test]
 fn exit_159_with_block_marker_returns_rich_message() {
     let sandbox = make_sandbox();
@@ -95,7 +95,6 @@ fn exit_159_with_block_marker_returns_rich_message() {
     match result {
         ExitReason::Denied { message, .. } => {
             assert!(message.contains("syscall='mount'"));
-            assert!(message.contains("category='mount'"));
             assert!(message.contains("nr=165"));
             assert!(message.contains("arch=0xc000003e"));
             assert!(message.contains("reason=blacklist"));

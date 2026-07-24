@@ -21,6 +21,10 @@ pub struct SandboxConfig {
     pub network_enabled: bool,
     pub timeout_default_secs: u64,
     pub timeout_max_secs: u64,
+    /// syscall 号列表，通过 USER_NOTIF 拦截（`--seccomp-deny-nr`）。
+    pub seccomp_deny_nrs: Vec<u32>,
+    /// 外部原始 cBPF 字节（`--seccomp-filter-fd`，从 fd 读取后存入）。
+    pub seccomp_filter_bytes: Vec<Vec<u8>>,
 }
 
 impl Default for SandboxConfig {
@@ -31,6 +35,8 @@ impl Default for SandboxConfig {
             network_enabled: false,
             timeout_default_secs: 30,
             timeout_max_secs: 300,
+            seccomp_deny_nrs: vec![],
+            seccomp_filter_bytes: vec![],
         }
     }
 }
@@ -118,6 +124,18 @@ impl SandboxConfig {
     pub fn with_timeout(mut self, default_secs: u64, max_secs: u64) -> Self {
         self.timeout_default_secs = default_secs;
         self.timeout_max_secs = max_secs;
+        self
+    }
+
+    /// 添加一个要通过 USER_NOTIF 拦截的 syscall 号（等价于 `--seccomp-deny-nr`）。
+    pub fn with_seccomp_deny_nr(mut self, nr: u32) -> Self {
+        self.seccomp_deny_nrs.push(nr);
+        self
+    }
+
+    /// 添加一段外部原始 cBPF filter（等价于 `--seccomp-filter-fd`）。
+    pub fn with_seccomp_filter(mut self, bytes: Vec<u8>) -> Self {
+        self.seccomp_filter_bytes.push(bytes);
         self
     }
 

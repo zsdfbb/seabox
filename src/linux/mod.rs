@@ -98,9 +98,9 @@ impl SandboxImpl for LinuxSandbox {
 
         // ── 步骤 2：构建 seccomp BPF filter ───────────────────────────
         let bpf_filter = self.build_bpf_filter();
-        // USER_NOTIF 路径下不再需要把 sock_fprog 传入 pre_exec：
-        // 子进程在 pre_exec 内自己调用 `seccomp::install_user_notif_filter`，
-        // 它会就地构造 sock_fprog 并通过 seccomp(2) 提交。
+        let has_deny = bpf_filter.is_some();
+        // 提取外部 BPF 字节（fork 后子进程需要 owned 数据）
+        let ext_filter_bytes: Vec<Vec<u8>> = self.config.seccomp_filter_bytes.clone();
 
         // ── 步骤 3：必要时在 cwd 中展开 ~ ─────────────────────────────
         let cwd = match spec.cwd.to_str() {
@@ -108,17 +108,18 @@ impl SandboxImpl for LinuxSandbox {
             None => spec.cwd.clone(),
         };
 
-        // ── 步骤 4：创建 socketpair（父端 + 子端）─────────────────────
-        //
-        // socketpair(AF_UNIX, SOCK_SEQPACKET, 0) → 返回 [parent_fd, child_fd]。
-        //
-        // - 父端保留 `parent_stream` 用于 `recvmsg` 收 listener fd。
-        // - 子端原始 fd 数值 `child_fd` 通过 `i32` 传入 `pre_exec` 闭包
-        //   （async-signal-safe），由 `send_fd` 调用后显式 `libc::close`。
-        let (parent_stream, child_sock) = create_socketpair()?;
-        // 提取原始 fd 数值供子进程关闭（fork 后子进程继承了两端 fd）
-        let child_fd_raw = child_sock.as_raw_fd();
-        let parent_fd_raw_for_child = parent_stream.as_raw_fd();
+        // ── 步骤 4：创建 socketpair（仅 USER_NOTIF 路径需要）────────────
+        let (parent_stream, child_sock) = if has_deny {
+            let (p, c) = create_socketpair()?;
+            (Some(p), Some(c))
+        } else {
+            (None, None)
+        };
+        let child_fd_raw = child_sock.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1);
+        let parent_fd_raw_for_child = parent_stream
+            .as_ref()
+            .map(|fd| fd.as_raw_fd())
+            .unwrap_or(-1);
 
         // ── 计算 namespace 参数 ────────────────────────────────
         let ns = &self.config.namespaces;
@@ -317,33 +318,55 @@ impl SandboxImpl for LinuxSandbox {
                 }
             }
 
-            // 第 9 步：seccomp → listener fd
-            let listener_fd = match seccomp::install_user_notif_filter(&bpf_filter) {
-                Ok(fd) => fd,
-                Err(_) => unsafe {
-                    libc::_exit(1);
-                },
-            };
+            // 第 9 步：seccomp（如果需要）
+            if let Some(ref filter) = bpf_filter {
+                // USER_NOTIF 路径：安装 deny filter 并获取 listener fd
+                let listener_fd = match seccomp::install_user_notif_filter(filter) {
+                    Ok(fd) => fd,
+                    Err(_) => unsafe {
+                        libc::_exit(1);
+                    },
+                };
 
-            // 第 10 步：sendmsg SCM_RIGHTS
-            if send_fd(child_fd_raw, listener_fd).is_err() {
-                unsafe {
-                    libc::close(listener_fd);
+                // 第 10 步：sendmsg SCM_RIGHTS（将 listener fd 发给父进程）
+                if send_fd(child_fd_raw, listener_fd).is_err() {
+                    unsafe {
+                        libc::close(listener_fd);
+                    }
+                    unsafe {
+                        libc::close(child_fd_raw);
+                    }
+                    unsafe {
+                        libc::_exit(1);
+                    }
                 }
                 unsafe {
                     libc::close(child_fd_raw);
                 }
-                unsafe {
-                    libc::_exit(1);
+                // 关掉子进程继承的 parent_stream 端
+                if parent_fd_raw_for_child >= 0 {
+                    unsafe {
+                        libc::close(parent_fd_raw_for_child);
+                    }
                 }
             }
-            unsafe {
-                libc::close(child_fd_raw);
-            }
 
-            // 关掉子进程继承的 parent_stream 端，避免泄漏到 exec 后的业务进程
-            unsafe {
-                libc::close(parent_fd_raw_for_child);
+            // 安装外部 BPF filter（prctl 直装，无 NEW_LISTENER）
+            for ext_bytes in &ext_filter_bytes {
+                // 将字节转为 sock_filter 切片
+                // SAFETY: ext_bytes 由外部用户提供，必须是合法的 cBPF 字节码。
+                // 内核会在 prctl 时校验；格式不合法会返回 EINVAL。
+                let filter = unsafe {
+                    std::slice::from_raw_parts(
+                        ext_bytes.as_ptr() as *const seccomp::sock_filter,
+                        ext_bytes.len() / std::mem::size_of::<seccomp::sock_filter>(),
+                    )
+                };
+                if seccomp::install_plain_filter(filter).is_err() {
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
             }
 
             // 第 11 步：execvp
@@ -368,8 +391,12 @@ impl SandboxImpl for LinuxSandbox {
         drop(child_sock);
 
         let blocked = std::sync::Arc::new(std::sync::Mutex::new(None::<(u32, u32)>));
-        let parent_fd_raw = parent_stream.as_raw_fd();
-        let _notif_handle = spawn_user_notif_worker(parent_fd_raw, &blocked)?;
+        let _notif_handle = if let Some(ref parent_stream) = parent_stream {
+            let parent_fd_raw = parent_stream.as_raw_fd();
+            Some(spawn_user_notif_worker(parent_fd_raw, &blocked)?)
+        } else {
+            None
+        };
 
         // waitpid 替代 waitid
         let mut status: i32 = 0;
@@ -417,14 +444,11 @@ impl SandboxImpl for LinuxSandbox {
         // 首选来源。直接查表生成富诊断消息。即便 exit_code == 0 也命中 Denied。
         if let Some((nr, arch)) = blocked {
             let name = seccomp::syscall_name(nr).unwrap_or("unknown");
-            let category = seccomp::syscall_by_name(name)
-                .map(|s| s.category.tag())
-                .unwrap_or("unknown");
             return Denied {
                 mechanism: DenyMechanism::Seccomp,
                 message: format!(
                     "Blocked by seccomp filter (SIGSYS): \
-                     syscall='{name}' category='{category}' nr={nr} \
+                     syscall='{name}' nr={nr} \
                      arch=0x{arch:x} reason=blacklist signal=SIGSYS"
                 ),
             };
@@ -485,10 +509,14 @@ impl LinuxSandbox {
 
     /// 构建 seccomp BPF 黑名单 filter。
     ///
-    /// 返回一个包含 `BLACKLIST.len() + 6` 条 `sock_filter` 指令的 `Vec`
-    ///（详见 [`seccomp::build_blacklist_filter`]）。
-    fn build_bpf_filter(&self) -> Vec<seccomp::sock_filter> {
-        seccomp::build_blacklist_filter()
+    /// 当 `config.seccomp_deny_nrs` 非空时返回 `Some(filter)`，
+    /// 否则返回 `None`（不装 seccomp filter）。
+    fn build_bpf_filter(&self) -> Option<Vec<seccomp::sock_filter>> {
+        if self.config.seccomp_deny_nrs.is_empty() {
+            None
+        } else {
+            Some(seccomp::build_deny_filter(&self.config.seccomp_deny_nrs))
+        }
     }
 }
 

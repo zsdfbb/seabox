@@ -438,13 +438,17 @@ fn unshare_pid_exit_code_forwarding() {
 
 #[test]
 fn env_flag_sets_variable() {
-    let out = run_cli(&["run", "--env", "SANDBOX_TEST=hello", "--", "sh", "-c", "echo $SANDBOX_TEST"]);
+    let out = run_cli(&[
+        "run",
+        "--env",
+        "SANDBOX_TEST=hello",
+        "--",
+        "sh",
+        "-c",
+        "echo $SANDBOX_TEST",
+    ]);
     assert_eq!(out.exit_code, Some(0), "--env: {:?}", out);
-    assert_eq!(
-        out.stdout.trim(),
-        "hello",
-        "SANDBOX_TEST should be 'hello'"
-    );
+    assert_eq!(out.stdout.trim(), "hello", "SANDBOX_TEST should be 'hello'");
 }
 
 // ---------------------------------------------------------------------------
@@ -454,8 +458,14 @@ fn env_flag_sets_variable() {
 #[test]
 fn clearenv_with_env_combines() {
     let out = run_cli(&[
-        "run", "--clearenv", "--env", "SANDBOX_TEST=world",
-        "--", "sh", "-c", "echo \"[$SANDBOX_TEST] [$HOME]\"",
+        "run",
+        "--clearenv",
+        "--env",
+        "SANDBOX_TEST=world",
+        "--",
+        "sh",
+        "-c",
+        "echo \"[$SANDBOX_TEST] [$HOME]\"",
     ]);
     assert_eq!(out.exit_code, Some(0), "clearenv+env: {:?}", out);
     assert_eq!(
@@ -488,8 +498,15 @@ fn unsetenv_removes_variable() {
 #[test]
 fn env_latter_overrides_former() {
     let out = run_cli(&[
-        "run", "--env", "OVERRIDE=first", "--env", "OVERRIDE=second",
-        "--", "sh", "-c", "echo $OVERRIDE",
+        "run",
+        "--env",
+        "OVERRIDE=first",
+        "--env",
+        "OVERRIDE=second",
+        "--",
+        "sh",
+        "-c",
+        "echo $OVERRIDE",
     ]);
     assert_eq!(out.exit_code, Some(0), "--env override: {:?}", out);
     assert_eq!(
@@ -525,8 +542,13 @@ fn env_missing_equals_fails() {
 #[test]
 fn unsetenv_nonexistent_is_noop() {
     let out = run_cli(&[
-        "run", "--unsetenv", "THIS_VAR_DOES_NOT_EXIST_12345",
-        "--", "sh", "-c", "echo ok",
+        "run",
+        "--unsetenv",
+        "THIS_VAR_DOES_NOT_EXIST_12345",
+        "--",
+        "sh",
+        "-c",
+        "echo ok",
     ]);
     assert_eq!(
         out.exit_code,

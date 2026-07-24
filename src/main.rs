@@ -10,9 +10,7 @@ use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
 /// 解析 `KEY=VALUE` 格式的环境变量，返回 `(key, value)`。
 fn parse_env_var(s: &str) -> Result<(String, String), String> {
     let (key, val) = s.split_once('=').ok_or_else(|| {
-        format!(
-            "invalid --env value '{s}': expected KEY=VALUE format (missing '=')"
-        )
+        format!("invalid --env value '{s}': expected KEY=VALUE format (missing '=')")
     })?;
     if key.is_empty() {
         return Err("invalid --env value: KEY must not be empty".into());
@@ -26,6 +24,7 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
 
 #[derive(Parser)]
 #[command(name = "sandbox-runtime")]
+#[allow(clippy::large_enum_variant)]
 enum Cli {
     /// 在沙箱内运行一条命令
     Run {
@@ -105,6 +104,14 @@ enum Cli {
         #[arg(long)]
         clearenv: bool,
 
+        /// 通过 USER_NOTIF 拦截指定 syscall 号（可重复）
+        #[arg(long)]
+        seccomp_deny_nr: Vec<u32>,
+
+        /// 从文件描述符读取外部原始 cBPF filter（可重复）
+        #[arg(long)]
+        seccomp_filter_fd: Vec<std::os::unix::io::RawFd>,
+
         /// 要执行的命令（trailing 参数；使用 -- 进行分隔）
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -150,6 +157,8 @@ fn main() -> anyhow::Result<()> {
             env: env_vars,
             unsetenv,
             clearenv,
+            seccomp_deny_nr,
+            seccomp_filter_fd,
             timeout,
             timeout_max,
         } => cmd_run(
@@ -173,6 +182,8 @@ fn main() -> anyhow::Result<()> {
             env_vars,
             unsetenv,
             clearenv,
+            seccomp_deny_nr,
+            seccomp_filter_fd,
             timeout,
             timeout_max,
         ),
@@ -208,6 +219,8 @@ fn cmd_run(
     env_vars: Vec<(String, String)>,
     unsetenv: Vec<String>,
     clearenv: bool,
+    seccomp_deny_nrs: Vec<u32>,
+    seccomp_filter_fds: Vec<std::os::unix::io::RawFd>,
     timeout: Option<u64>,
     timeout_max: Option<u64>,
 ) -> anyhow::Result<()> {
@@ -231,7 +244,7 @@ fn cmd_run(
         anyhow::bail!("--hostname requires --unshare-uts or --unshare-all");
     }
 
-    let config = build_config(
+    let mut config = build_config(
         landlock,
         allow_network,
         unshare_all,
@@ -248,6 +261,24 @@ fn cmd_run(
         hostname,
         timeout_max,
     )?;
+
+    // --seccomp-deny-nr: 添加 syscall 号到配置
+    for nr in seccomp_deny_nrs {
+        config = config.with_seccomp_deny_nr(nr);
+    }
+
+    // --seccomp-filter-fd: 从 fd 读取原始 cBPF 字节
+    for fd in seccomp_filter_fds {
+        use std::os::fd::FromRawFd;
+        // SAFETY: fd 来自 CLI 参数，用户负责确保其有效性。
+        // 转为 OwnedFd 确保读取后自动 close。
+        let owned_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        let mut file = std::fs::File::from(owned_fd);
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut bytes)
+            .map_err(|e| anyhow::anyhow!("failed to read seccomp BPF from fd {fd}: {e}"))?;
+        config = config.with_seccomp_filter(bytes);
+    }
 
     // --timeout SECS 覆盖默认值，但不允许超过 timeout_max_secs
     let timeout_secs = match timeout {
@@ -377,5 +408,7 @@ fn build_config(
         network_enabled: allow_network,
         timeout_default_secs: 30,
         timeout_max_secs: timeout_max.unwrap_or(300),
+        seccomp_deny_nrs: vec![],
+        seccomp_filter_bytes: vec![],
     })
 }
