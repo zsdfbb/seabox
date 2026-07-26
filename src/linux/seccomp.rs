@@ -259,71 +259,19 @@ impl Syscall {
 
 /// 已知 syscall 的诊断查表。保留用于 `syscall_name()` 等诊断函数。
 pub static SYSCALLS: &[Syscall] = &[
-    Syscall {
-        name: "mount",
-        nr_x86_64: 165,
-        nr_aarch64: 40,
-    },
-    Syscall {
-        name: "umount2",
-        nr_x86_64: 166,
-        nr_aarch64: 39,
-    },
-    Syscall {
-        name: "pivot_root",
-        nr_x86_64: 155,
-        nr_aarch64: 41,
-    },
-    Syscall {
-        name: "chroot",
-        nr_x86_64: 161,
-        nr_aarch64: 51,
-    },
-    Syscall {
-        name: "ptrace",
-        nr_x86_64: 101,
-        nr_aarch64: 117,
-    },
-    Syscall {
-        name: "kexec_load",
-        nr_x86_64: 246,
-        nr_aarch64: 104,
-    },
-    Syscall {
-        name: "kexec_file_load",
-        nr_x86_64: 320,
-        nr_aarch64: 294,
-    },
-    Syscall {
-        name: "reboot",
-        nr_x86_64: 169,
-        nr_aarch64: 142,
-    },
-    Syscall {
-        name: "init_module",
-        nr_x86_64: 175,
-        nr_aarch64: 105,
-    },
-    Syscall {
-        name: "finit_module",
-        nr_x86_64: 313,
-        nr_aarch64: 106,
-    },
-    Syscall {
-        name: "delete_module",
-        nr_x86_64: 176,
-        nr_aarch64: 107,
-    },
-    Syscall {
-        name: "unshare",
-        nr_x86_64: 97,
-        nr_aarch64: 97,
-    },
-    Syscall {
-        name: "bpf",
-        nr_x86_64: 357,
-        nr_aarch64: 280,
-    },
+    Syscall { name: "mount", nr_x86_64: 165, nr_aarch64: 40 },
+    Syscall { name: "umount2", nr_x86_64: 166, nr_aarch64: 39 },
+    Syscall { name: "pivot_root", nr_x86_64: 155, nr_aarch64: 41 },
+    Syscall { name: "chroot", nr_x86_64: 161, nr_aarch64: 51 },
+    Syscall { name: "ptrace", nr_x86_64: 101, nr_aarch64: 117 },
+    Syscall { name: "kexec_load", nr_x86_64: 246, nr_aarch64: 104 },
+    Syscall { name: "kexec_file_load", nr_x86_64: 320, nr_aarch64: 294 },
+    Syscall { name: "reboot", nr_x86_64: 169, nr_aarch64: 142 },
+    Syscall { name: "init_module", nr_x86_64: 175, nr_aarch64: 105 },
+    Syscall { name: "finit_module", nr_x86_64: 313, nr_aarch64: 106 },
+    Syscall { name: "delete_module", nr_x86_64: 176, nr_aarch64: 107 },
+    Syscall { name: "unshare", nr_x86_64: 97, nr_aarch64: 97 },
+    Syscall { name: "bpf", nr_x86_64: 357, nr_aarch64: 280 },
 ];
 
 // ---------------------------------------------------------------------------
