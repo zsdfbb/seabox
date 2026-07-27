@@ -12,6 +12,8 @@ use std::time::Duration;
 
 pub mod config;
 
+pub use config::SandboxConfig;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 

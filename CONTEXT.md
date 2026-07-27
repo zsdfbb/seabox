@@ -4,7 +4,7 @@
 
 | 术语 | 定义 |
 |---|---|
-| Sandbox | 通过 OS 内核机制对进程强制施加资源访问限制的运行时 |
+| Fork-After-Zero-Heap | 核心约束：fork 后到 execve 之间，子进程只能使用 fork 前预分配的内存 + 纯 syscall。任何用户态堆操作（malloc/free/CString::new/setenv/execvp）都是不安全的，因为其他线程可能在 fork 时持有分配器锁。参见 ADR 0003 |
 | SandboxPolicy | 声明式的资源访问权限声明，决定 Sandbox 的行为边界 |
 | SandboxConfig | SandboxPolicy + 超时等运行时参数的完整配置。包含 `filesystem.landlock: Vec<LandlockRule>`、`network.enabled: bool`、`timeout` |
 | Landlock | Linux 5.13+ 内核 LSM，允许进程自限文件系统访问（grant-only 模型）。支持 ABI v1-v7，进程通过 `landlock_create_ruleset` + `landlock_add_rule` + `landlock_restrict_self` 在 fork-exec 之间施加 |

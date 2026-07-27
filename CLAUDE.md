@@ -4,28 +4,57 @@
 
 ## 项目概述
 
-一个**独立**的 Rust 沙箱工具，在 OS 层面强制对任意命令施加文件系统与进程限制，**无需容器运行时**。当前目标平台：Linux（Landlock + seccomp）。
+一个为 **AI Agent 工具**（Claude Code、CodeWhale、Cursor……）设计的 Rust 沙箱。当 Agent 执行 shell 命令或修改文件时，本工具在 OS 层面强制施加文件系统与进程限制，**无需容器运行时**。目标是 **bubblewrap 的功能超集 + Landlock 文件系统 ACL**。
+
+> 核心理念：Agent 每次执行命令都应默认受限。用户不需要对每个命令弹窗做判断——配置一次策略，Agent 自动遵守。
+
+当前目标平台：Linux（Landlock + seccomp + namespaces）。后续规划：macOS（Seatbelt）。
+
+### 与 bubblewrap 的定位差异
+
+| 维度 | bubblewrap | sandbox-runtime |
+|------|-----------|----------------|
+| 文件系统 | 手动 bind mount（`--ro-bind` / `--tmpfs`） | **Landlock ACL**（`--landlock /:ro`，声明式、零挂载） |
+| seccomp | 仅外部原始 BPF（`--seccomp FD`） | 外部 BPF + **`--seccomp-deny-nr` 精确拦截 + USER_NOTIF 诊断** |
+| 超时控制 | 无 | `--timeout` / `--timeout-max` |
+| 使用方式 | CLI only | CLI + **Crate API**（`SandboxConfig::with_*`） |
+| 能力检查 | 无 | `sandbox-runtime check` |
+| 外部网络 | `--share-net`（二选一） | `--allow-network`（与 `--unshare-net` 正交组合） |
+| 特权降级 | `--cap-drop ALL` | **user ns 自动降级**（ns 内无特权） |
+
+共同覆盖的 namespace/seccomp/environment 功能保持 CLI flag 级别的兼容。
 
 ### 动机
 
-Agent 类编程工具（Claude Code、CodeWhale、Cursor……）会代表用户频繁执行 shell 命令、修改文件。仅靠权限弹窗并不够——它会让用户疲劳，最终形成"看见就点允许"的肌肉记忆。**内核级沙箱**以声明式方式强制执行策略：大多数命令无感放行，危险命令直接阻断，仅边缘情况弹窗。
+Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。传统权限弹窗有两个根本缺陷：
+1. **疲劳决策**：用户面对连续弹窗，最终形成"看见就点允许"的肌肉记忆
+2. **粒度过粗**：要么全允许、要么全拒绝，没有中间态
+
+**内核级沙箱**解决这个问题的方式是**策略驱动**：用户事先声明文件系统权限（`--landlock /:ro --landlock /tmp:rw`）和 syscall 黑名单（`--seccomp-deny-nr 165`），Agent 在策略范围内自动放行，越界时精确拦截。
+
+与面向人类用户的沙箱（bubblewrap、firejail）不同，本工具从 API 层面支持编程集成：`SandboxConfig` 可编程构造、`CommandSpec` 链式配置、结构化退出原因分类——适合嵌入 Agent 框架作为安全层。
 
 ## 当前状态
 
-- ✅ **Phase 1 已完成**：Landlock 文件系统 ACL + seccomp BPF 黑名单（13 syscall）+ CLI + 87 项集成测试
-- 🚧 **Phase 2 进行中**：user_namespace + netns + 动态 seccomp 策略
+- ✅ **Phase 1**：Landlock 文件系统 ACL + seccomp BPF USER_NOTIF + CLI
+- ✅ **Phase 2**：6 种命名空间隔离（User/IPC/PID/Net/UTS/Cgroup）+ 动态 seccomp（`--seccomp-deny-nr` / `--seccomp-filter-fd`）+ 网络隔离与 loopback 控制
+- 🚧 **Phase 2b**：eBPF 网络过滤（aya，IP 级访问控制，与 Phase 3/4 并行）
+- 🚧 **Phase 3**：macOS Seatbelt 支持
+- 🚧 **Phase 4**：CodeWhale 集成 + HTTP API
 
 ## 文档索引
 
 | 文档 | 内容 |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 系统架构图 + Core trait + 模块职责映射 |
-| [docs/linux-sandbox.md](docs/linux-sandbox.md) | Linux 内核能力矩阵 + Landlock ABI + seccomp 黑名单 |
+| [docs/linux-sandbox.md](docs/linux-sandbox.md) | Linux 内核能力矩阵 + Landlock ABI + seccomp 动态策略 + namespaces |
 | [docs/macos-sandbox.md](docs/macos-sandbox.md) | macOS Seatbelt 设计（尚未实现） |
 | [docs/development-phases.md](docs/development-phases.md) | Phase 1-4 路线 + 依赖关系 + 当前状态 |
 | [docs/future-extensions.md](docs/future-extensions.md) | 动态授权 / eBPF / PID ns（路线预留） |
 | [docs/adr/0001-seccomp-user-notif-vs-sigsys.md](docs/adr/0001-seccomp-user-notif-vs-sigsys.md) | ADR 001：seccomp USER_NOTIF vs SIGSYS handler |
 | [docs/adr/0002-config-landlock-rules.md](docs/adr/0002-config-landlock-rules.md) | ADR 002：SandboxConfig 扁平结构 + Raw Landlock 规则 |
+| [docs/adr/0003-fork-after-zero-heap.md](docs/adr/0003-fork-after-zero-heap.md) | ADR 003：fork 后子进程零堆操作（多线程 safe） |
+| [docs/arch/phase2-wrapup/](docs/arch/phase2-wrapup/) | Phase 2 收尾设计：`--allow-network` 方案、四方案对比、ADR、review |
 | [docs/learned.md](docs/learned.md) | 跨会话经验教训（踩坑记录） |
 | [CONTEXT.md](CONTEXT.md) | 领域词汇表 |
 
@@ -38,7 +67,7 @@ sandbox-runtime-rs/
 ├── LICENSE                     # MIT
 ├── CLAUDE.md                   # 本文件
 ├── CONTEXT.md                  # 领域词汇表
-├── docs/                       # 详细文档
+├── docs/
 │   ├── architecture.md
 │   ├── linux-sandbox.md
 │   ├── macos-sandbox.md        # 未实现
@@ -47,7 +76,10 @@ sandbox-runtime-rs/
 │   ├── learned.md
 │   ├── adr/
 │   │   ├── 0001-seccomp-user-notif-vs-sigsys.md
-│   │   └── 0002-config-landlock-rules.md
+│   │   ├── 0002-config-landlock-rules.md
+│   │   └── 0003-fork-after-zero-heap.md
+│   ├── arch/
+│   │   └── phase2-wrapup/      # --allow-network 设计
 │   ├── design-final/
 │   │   └── seccomp-deny-message.md
 │   ├── design-plans/completed/
@@ -55,18 +87,20 @@ sandbox-runtime-rs/
 ├── src/
 │   ├── main.rs                 # CLI 入口（clap derive enum）
 │   ├── lib.rs                  # pub trait Sandbox + 公共类型
-│   ├── config.rs               # SandboxConfig serde + Builder
+│   ├── config.rs               # SandboxConfig + Builder + NamespacesConfig
 │   ├── linux/
 │   │   ├── mod.rs              # LinuxSandbox + execute() + USER_NOTIF worker
 │   │   ├── landlock.rs         # Landlock ruleset 构建
-│   │   └── seccomp.rs          # BPF filter + USER_NOTIF 安装
+│   │   ├── namespaces.rs       # 6 种 namespace unshare + 探测
+│   │   └── seccomp.rs          # BPF filter + USER_NOTIF + prctl 安装
 │   └── bin/
 │       └── syscall_probe.rs    # seccomp 测试辅助二进制
 ├── tests/
 │   ├── config_test.rs          # 配置解析测试
 │   ├── deny_detect_test.rs     # ExitReason 分类测试
 │   ├── landlock_test.rs        # Landlock ACL 测试（需要 5.13+）
-│   └── seccomp_test.rs         # 13 个黑名单 syscall 测试 + 正常退出
+│   ├── namespace_test.rs       # 21 个命名空间端到端测试
+│   └── seccomp_test.rs         # seccomp 黑名单 + --seccomp-deny-nr 测试
 ├── examples/                   # 当前均为 stub
 │   ├── cli_basic.rs
 │   ├── cli_from_toml.rs
@@ -83,17 +117,19 @@ cargo build --release
 # 运行沙箱
 cargo run -- run --landlock '/:ro' -- cat /etc/passwd
 cargo run -- run --landlock '/:ro' --landlock '/tmp:rw' -- cargo build
-cargo run -- run --allow-network -- curl example.com       # 网络占位
-cargo run -- run -- ls -la                                  # full-access
-cargo run -- run --env FOO=bar -- sh -c 'echo $FOO'        # 设置环境变量
-cargo run -- run --unsetenv HOME -- sh -c 'echo $HOME'     # 删除环境变量
-cargo run -- run --clearenv --env PATH=/usr/bin -- ls       # 白名单模式
+cargo run -- run --unshare-net --allow-network -- curl example.com
+cargo run -- run --unshare-all -- ls -la
+cargo run -- run --env FOO=bar -- sh -c 'echo $FOO'
+cargo run -- run --unsetenv HOME -- sh -c 'echo $HOME'
+cargo run -- run --clearenv --env PATH=/usr/bin -- ls
+cargo run -- run --seccomp-deny-nr 165 -- ls              # 拦截 mount
+cargo run -- run --seccomp-deny-nr 165 --seccomp-deny-nr 97 -- ls
 
 # 检查当前系统能力
 cargo run -- check
 
 # 测试
-cargo test                          # 跑全部（库单元 + 集成 + 文档）
+cargo test                          # 全部（库单元 + 集成 + 文档）
 cargo test --lib                    # 仅库单元测试
 cargo test --test <name>            # 指定集成测试文件
 cargo test <name_fragment>          # 按测试名过滤
@@ -120,6 +156,7 @@ cargo check
 - `classify_exit()` 以结构化 `blocked: Option<(u32, u32)>` 作为首选判断依据
 - 交叉编译目标：`x86_64-unknown-linux-musl`（静态链接），`aarch64-apple-darwin`
 - License: MIT（见 `/LICENSE`）
+- **核心安全约束（ADR 0003）**：`fork()` 后到 `execve()` 之间，子进程只能使用 fork 前预分配的内存 + 纯 syscall。禁止任何堆操作，否则多线程 fork 时可能死锁。
 - **CLI + Crate API 对应**：每个 CLI flag 都应有对应的 crate 层 `with_*` 方法。
   沙箱配置（`--unshare-user`、`--landlock` 等）对应 `SandboxConfig::with_*`；
   命令规格（`--env`、`--clearenv`、`--chdir` 等）对应 `CommandSpec::with_*`。
@@ -134,10 +171,11 @@ cargo check
 | `tests/config_test.rs` | `SandboxConfig` 的 TOML / Builder / 展开行为 | 无 |
 | `tests/deny_detect_test.rs` | `classify_exit()` 在各种 exit_code + blocked 组合下的分类 | Linux |
 | `tests/landlock_test.rs` | Landlock 实际 ACL 行为（库 API + CLI 二进制） | Linux 5.13+ |
-| `tests/seccomp_test.rs` | 黑名单 13 个 syscall 端到端触发 + CLI 二进制拒绝消息 | Linux + seccomp |
+| `tests/seccomp_test.rs` | 13 个黑名单 syscall + `--seccomp-deny-nr` + 拒绝消息 | Linux + seccomp |
+| `tests/namespace_test.rs` | 6 种 namespace 隔离 + uid/gid/hostname + chdir + env | Linux |
 
 跳过与预检：
-- 内核能力缺失时（无 Landlock / 无 seccomp）测试**自动跳过**（打印 `Landlock not available, skipping test`），不是 fail。
+- 内核能力缺失时（无 Landlock / 无 seccomp / 无 namespace）测试**自动跳过**（打印 `Landlock not available, skipping test`），不是 fail。
 - 真正会写入主机或触发特权操作的测试在跑前先做**探针**：跑一次已知应被拒绝的操作确认机制生效。探针结果用 `OnceLock` 缓存。
 
 辅助二进制 `src/bin/syscall_probe.rs`：
@@ -149,7 +187,7 @@ cargo check
 ```bash
 cargo build --tests && cargo test --lib
 cargo test --test seccomp_test             # 全部 seccomp 测试（含逐 syscall 验证）
-cargo test --test landlock_test            # Landlock 二进制层验证
+cargo test --test namespace_test           # 命名空间隔离测试
 cargo test -- --nocapture 2>&1 | grep skipping
 ```
 

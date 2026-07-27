@@ -12,7 +12,7 @@
 //! 4. **子进程** 依次执行：
 //!    - `unshare(namespace_flags)`（创建 user/ipc/net/uts/cgroup 命名空间）
 //!    - `unshare(CLONE_NEWPID)` + `fork()`（PID 命名空间 + reaper，如需要）
-//!    - `clearenv()` + `setenv()`（环境变量）
+//!    - 环境变量通过 execve envp 参数传递（fork 前预计算）
 //!    - `chdir()`（工作目录）
 //!    - `prctl(PR_SET_NO_NEW_PRIVS, 1, …)`
 //!    - `write(/proc/self/uid_map + gid_map)`（user ns 映射，如需要）
@@ -20,7 +20,7 @@
 //!    - `landlock_restrict_self(ruleset_fd, 0)`（Landlock ACL，如规则存在）
 //!    - `seccomp(SECCOMP_SET_MODE_FILTER, NEW_LISTENER, &fprog)`（加载 BPF，返回 listener fd）
 //!    - `sendmsg(SCM_RIGHTS)`（将 listener fd 经 socketpair 传给父进程）
-//!    - `execvp(...)`（启动目标程序）
+//!    - `execve(...)`（启动目标程序，envp 指向预计算数组）
 //! 5. **父进程** worker 线程：
 //!    - 从 socketpair 用 `recvmsg(SCM_RIGHTS)` 拿到 listener fd
 //!    - 循环 `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 阻塞读拦截通知
@@ -34,10 +34,12 @@
 //!    `Arc<Mutex<Option<(nr, arch)>>>`，`execute` 返回后 `classify_exit`
 //!    读取该值，在 exit_code=0 的情况下仍然把命令归类为 `Denied { Seccomp }`。
 
+pub mod child_setup;
 pub mod landlock;
 pub mod namespaces;
 pub mod seccomp;
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::mem::{self, MaybeUninit};
 use std::os::fd::FromRawFd;
@@ -64,10 +66,6 @@ const SOCK_SEQPACKET: libc::c_int = libc::SOCK_SEQPACKET;
 /// `setsockopt(SO_PASSCRED)` / cmsg 类型：传递文件描述符。libc 在
 /// linux_like 平台暴露 `SCM_RIGHTS = 0x01`。
 const SCM_RIGHTS: libc::c_int = libc::SCM_RIGHTS;
-
-/// 我们用作 "control ping" 的字节载荷（一个 magic byte）。
-/// 子进程 sendmsg 时附带 listener fd，载荷是单字节 `0x42`。
-const CTRL_PAYLOAD: [u8; 1] = [0x42];
 
 // ---------------------------------------------------------------------------
 // LinuxSandbox
@@ -99,8 +97,33 @@ impl SandboxImpl for LinuxSandbox {
         // ── 步骤 2：构建 seccomp BPF filter ───────────────────────────
         let bpf_filter = self.build_bpf_filter();
         let has_deny = bpf_filter.is_some();
-        // 提取外部 BPF 字节（fork 后子进程需要 owned 数据）
-        let ext_filter_bytes: Vec<Vec<u8>> = self.config.seccomp_filter_bytes.clone();
+        // ── 预对齐外部 BPF filter（修复 from_raw_parts 对齐 UB）──
+        let aligned_ext_filters: Vec<Vec<seccomp::sock_filter>> = self.config.seccomp_filter_bytes
+            .iter()
+            .map(|bytes| {
+                assert!(
+                    bytes.len() % mem::size_of::<seccomp::sock_filter>() == 0,
+                    "external BPF bytes length {} is not a multiple of sock_filter size {}",
+                    bytes.len(),
+                    mem::size_of::<seccomp::sock_filter>()
+                );
+                bytes
+                    .chunks(mem::size_of::<seccomp::sock_filter>())
+                    .map(|chunk| unsafe {
+                        std::ptr::read_unaligned(chunk.as_ptr() as *const seccomp::sock_filter)
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // ── 预对齐外部 BPF filter 描述（child 可见的指针 + 长度数组）──
+        let ext_filters_desc: Vec<child_setup::ExtFilterDesc> = aligned_ext_filters
+            .iter()
+            .map(|v| child_setup::ExtFilterDesc {
+                data: v.as_ptr(),
+                len: v.len(),
+            })
+            .collect();
 
         // ── 步骤 3：必要时在 cwd 中展开 ~ ─────────────────────────────
         let cwd = match spec.cwd.to_str() {
@@ -133,22 +156,22 @@ impl SandboxImpl for LinuxSandbox {
         };
 
         // 常规 namespace（不含 PID，PID 通过 double-fork 单独处理）
-        let ns_ops: Vec<(i32, bool)> = {
+        let ns_ops: Vec<child_setup::NsOp> = {
             let mut v = Vec::new();
             if effective_user {
-                v.push((libc::CLONE_NEWUSER, ns.user_try));
+                v.push(child_setup::NsOp { flag: libc::CLONE_NEWUSER, try_mode: ns.user_try as i32 });
             }
             if ns.ipc {
-                v.push((libc::CLONE_NEWIPC, false));
+                v.push(child_setup::NsOp { flag: libc::CLONE_NEWIPC, try_mode: 0 });
             }
             if ns.net {
-                v.push((libc::CLONE_NEWNET, false));
+                v.push(child_setup::NsOp { flag: libc::CLONE_NEWNET, try_mode: 0 });
             }
             if ns.uts {
-                v.push((libc::CLONE_NEWUTS, false));
+                v.push(child_setup::NsOp { flag: libc::CLONE_NEWUTS, try_mode: 0 });
             }
             if ns.cgroup {
-                v.push((libc::CLONE_NEWCGROUP, ns.cgroup_try));
+                v.push(child_setup::NsOp { flag: libc::CLONE_NEWCGROUP, try_mode: ns.cgroup_try as i32 });
             }
             v
         };
@@ -164,6 +187,30 @@ impl SandboxImpl for LinuxSandbox {
 
         // ── 预计算 hostname bytes ────────────────────────────
         let hostname_bytes: Option<Vec<u8>> = ns.hostname.as_ref().map(|h| h.as_bytes().to_vec());
+
+        // ── 预计算 envp（"KEY=val\0" NULL-terminated 数组）──
+        let envp_cstrings: Vec<CString> = spec.env
+            .iter()
+            .map(|(k, v)| CString::new(format!("{}={}", k, v)).unwrap_or_default())
+            .collect();
+        let mut envp: Vec<*const libc::c_char> =
+            envp_cstrings.iter().map(|s| s.as_ptr()).collect();
+        envp.push(std::ptr::null());
+
+        // ── 预计算 argv（program + args, NULL-terminated）──
+        let argv_cstrings: Vec<CString> = std::iter::once(spec.program.clone())
+            .chain(spec.args.clone())
+            .map(|a| CString::new(a).unwrap_or_default())
+            .collect();
+        let mut argv: Vec<*const libc::c_char> =
+            argv_cstrings.iter().map(|a| a.as_ptr()).collect();
+        argv.push(std::ptr::null());
+
+        // ── 预计算 cwd CString（chdir 用）──
+        let cwd_c = CString::new(cwd.to_str().unwrap_or("/")).unwrap_or_default();
+
+        // ── 解析程序路径（execve 不搜 PATH，需提前解析）──
+        let exec_path = resolve_exec_path(&spec.program, &spec.env);
 
         // ── 步骤 5：raw fork + 手动 setup ──────────────────────
         let pid = unsafe { libc::fork() };
@@ -182,208 +229,33 @@ impl SandboxImpl for LinuxSandbox {
         }
 
         if pid == 0 {
-            // ── 子进程：namespace + sandbox setup + exec ──
-
-            // 第 1 步：创建常规 namespace（含 user ns）
-            let mut user_ns_active = false;
-            for &(flag, try_mode) in &ns_ops {
-                let ret = unsafe { libc::syscall(libc::SYS_unshare, flag as libc::c_long) };
-                if ret != 0 {
-                    if try_mode {
-                        continue;
-                    }
-                    unsafe {
-                        libc::_exit(1);
-                    }
-                }
-                if (flag & libc::CLONE_NEWUSER) != 0 {
-                    user_ns_active = true;
-                }
-            }
-
-            // 第 2 步：PID namespace（如果需要）
-            if need_pid_reaper {
-                let ret =
-                    unsafe { libc::syscall(libc::SYS_unshare, libc::CLONE_NEWPID as libc::c_long) };
-                if ret != 0 {
-                    unsafe {
-                        libc::_exit(1);
-                    }
-                }
-
-                // unshare 后 fork() 的子进程是 PID 1（init）。需要两次 fork：
-                //   第一次 fork: 父进程（非 PID 1）wait → _exit
-                //               子进程（PID 1）继续
-                //   第二次 fork: PID 1（reaper）wait → _exit
-                //               子进程（PID 2）执行业务
-                let pid2 = unsafe { libc::fork() };
-                if pid2 < 0 {
-                    unsafe {
-                        libc::_exit(1);
-                    }
-                }
-                if pid2 > 0 {
-                    // 第一次 fork 的父进程（非 PID 1）：等待 PID 1
-                    let mut status: i32 = 0;
-                    unsafe {
-                        libc::waitpid(pid2, &mut status, 0);
-                    }
-                    let exit_code = if libc::WIFEXITED(status) {
-                        libc::WEXITSTATUS(status)
-                    } else if libc::WIFSIGNALED(status) {
-                        128 + libc::WTERMSIG(status)
-                    } else {
-                        1
-                    };
-                    unsafe {
-                        libc::_exit(exit_code);
-                    }
-                }
-                // ── PID 1（init）：第二次 fork ──
-                let pid3 = unsafe { libc::fork() };
-                if pid3 < 0 {
-                    unsafe {
-                        libc::_exit(1);
-                    }
-                }
-                if pid3 > 0 {
-                    // PID 1（reaper）：等所有子进程退出后转发退出码
-                    let exit_code = do_reaper(pid3);
-                    unsafe {
-                        libc::_exit(exit_code);
-                    }
-                }
-                // ── PID 2（业务进程）：继续后续 setup ──
-            }
-
-            // 第 3 步：clearenv + setenv
+            // ── 子进程：委托给 child_setup（此模块只接受 raw 类型，杜绝无意的堆操作）──
+            // SAFETY: 所有 raw pointer 引用的 backing storage（CString、Vec 等）
+            // 都是本函数中的局部变量，在 child 中不会被 drop（因为只调 execve / _exit）。
             unsafe {
-                libc::clearenv();
-            }
-            for (key, val) in &spec.env {
-                let k = CString::new(key.as_str()).unwrap_or_default();
-                let v = CString::new(val.as_str()).unwrap_or_default();
-                unsafe {
-                    libc::setenv(k.as_ptr(), v.as_ptr(), 1);
-                }
-            }
-
-            // 第 4 步：chdir
-            let cwd_str = cwd.to_str().unwrap_or("/");
-            let cwd_c = CString::new(cwd_str).unwrap_or_default();
-            if unsafe { libc::chdir(cwd_c.as_ptr()) } != 0 {
-                unsafe {
-                    libc::_exit(1);
-                }
-            }
-
-            // 第 5 步：prctl(NO_NEW_PRIVS)
-            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-                unsafe {
-                    libc::_exit(1);
-                }
-            }
-
-            // 第 6 步：uid/gid map
-            if user_ns_active {
-                unsafe {
-                    namespaces::write_ns_file(b"/proc/self/uid_map\0", &uid_map_content).ok();
-                }
-                unsafe {
-                    let _ = namespaces::write_ns_file(b"/proc/self/setgroups\0", b"deny\n");
-                }
-                unsafe {
-                    namespaces::write_ns_file(b"/proc/self/gid_map\0", &gid_map_content).ok();
-                }
-            }
-
-            // 第 7 步：sethostname
-            if let Some(ref h) = hostname_bytes {
-                unsafe {
-                    namespaces::set_hostname(h).ok();
-                }
-            }
-
-            // 第 8 步：landlock
-            if raw_ruleset_fd >= 0 {
-                let ret =
-                    unsafe { libc::syscall(libc::SYS_landlock_restrict_self, raw_ruleset_fd, 0) };
-                if ret != 0 {
-                    unsafe {
-                        libc::_exit(1);
-                    }
-                }
-                unsafe {
-                    libc::close(raw_ruleset_fd);
-                }
-            }
-
-            // 第 9 步：seccomp（如果需要）
-            if let Some(ref filter) = bpf_filter {
-                // USER_NOTIF 路径：安装 deny filter 并获取 listener fd
-                let listener_fd = match seccomp::install_user_notif_filter(filter) {
-                    Ok(fd) => fd,
-                    Err(_) => unsafe {
-                        libc::_exit(1);
-                    },
-                };
-
-                // 第 10 步：sendmsg SCM_RIGHTS（将 listener fd 发给父进程）
-                if send_fd(child_fd_raw, listener_fd).is_err() {
-                    unsafe {
-                        libc::close(listener_fd);
-                    }
-                    unsafe {
-                        libc::close(child_fd_raw);
-                    }
-                    unsafe {
-                        libc::_exit(1);
-                    }
-                }
-                unsafe {
-                    libc::close(child_fd_raw);
-                }
-                // 关掉子进程继承的 parent_stream 端
-                if parent_fd_raw_for_child >= 0 {
-                    unsafe {
-                        libc::close(parent_fd_raw_for_child);
-                    }
-                }
-            }
-
-            // 安装外部 BPF filter（prctl 直装，无 NEW_LISTENER）
-            for ext_bytes in &ext_filter_bytes {
-                // 将字节转为 sock_filter 切片
-                // SAFETY: ext_bytes 由外部用户提供，必须是合法的 cBPF 字节码。
-                // 内核会在 prctl 时校验；格式不合法会返回 EINVAL。
-                let filter = unsafe {
-                    std::slice::from_raw_parts(
-                        ext_bytes.as_ptr() as *const seccomp::sock_filter,
-                        ext_bytes.len() / std::mem::size_of::<seccomp::sock_filter>(),
-                    )
-                };
-                if seccomp::install_plain_filter(filter).is_err() {
-                    unsafe {
-                        libc::_exit(1);
-                    }
-                }
-            }
-
-            // 第 11 步：execvp
-            let cstring_args: Vec<CString> = std::iter::once(spec.program.clone())
-                .chain(spec.args.clone())
-                .map(|a| CString::new(a).unwrap_or_default())
-                .collect();
-            let mut argv: Vec<*const libc::c_char> =
-                cstring_args.iter().map(|a| a.as_ptr()).collect();
-            argv.push(std::ptr::null());
-            unsafe {
-                libc::execvp(argv[0], argv.as_ptr());
-            }
-
-            // execvp 失败才走到这里
-            unsafe {
-                libc::_exit(127);
+                child_setup::enter_child(
+                    exec_path.as_ptr(),
+                    argv.as_ptr(),
+                    envp.as_ptr(),
+                    cwd_c.as_ptr(),
+                    raw_ruleset_fd,
+                    bpf_filter.as_ref().map(|f| f.as_ptr()).unwrap_or(std::ptr::null()),
+                    bpf_filter.as_ref().map(|f| f.len()).unwrap_or(0),
+                    child_fd_raw,
+                    parent_fd_raw_for_child,
+                    ext_filters_desc.as_ptr(),
+                    ext_filters_desc.len(),
+                    ns_ops.as_ptr(),
+                    ns_ops.len(),
+                    need_pid_reaper,
+                    effective_user,
+                    uid_map_content.as_ptr(),
+                    uid_map_content.len(),
+                    gid_map_content.as_ptr(),
+                    gid_map_content.len(),
+                    hostname_bytes.as_ref().map(|h| h.as_ptr()).unwrap_or(std::ptr::null()),
+                    hostname_bytes.as_ref().map(|h| h.len()).unwrap_or(0),
+                );
             }
         }
 
@@ -520,6 +392,33 @@ impl LinuxSandbox {
     }
 }
 
+// ── fork-safe 辅助函数 ────────────────────────────────────────────────
+
+/// fork 前解析程序路径。含 '/' 直接返回原始路径；否则搜索 PATH。
+/// 优先检查 spec.env 中的 PATH 覆盖，fallback 到父进程环境变量。
+fn resolve_exec_path(program: &str, spec_env: &HashMap<String, String>) -> CString {
+    if program.contains('/') {
+        return CString::new(program).unwrap_or_default();
+    }
+    // 先检查 spec.env，fallback 到父进程环境变量。
+    // PATH 字符串必须绑定到局部变量，否则 as_deref 引用的临时变量被 drop。
+    let parent_path = std::env::var("PATH").ok();
+    let path: &str = spec_env
+        .get("PATH")
+        .map(|s| s.as_str())
+        .or(parent_path.as_deref())
+        .unwrap_or("/usr/bin:/bin");
+    for dir in std::env::split_paths(&path) {
+        let full = dir.join(program);
+        if full.is_file() {
+            if let Some(s) = full.to_str() {
+                return CString::new(s).unwrap_or_default();
+            }
+        }
+    }
+    CString::new(program).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // socketpair + SCM_RIGHTS helpers
 // ---------------------------------------------------------------------------
@@ -545,70 +444,6 @@ fn create_socketpair() -> std::io::Result<(OwnedFd, OwnedFd)> {
     let parent = unsafe { OwnedFd::from_raw_fd(fds[0]) };
     let child = unsafe { OwnedFd::from_raw_fd(fds[1]) };
     Ok((parent, child))
-}
-
-/// 把一个 fd 通过 `sendmsg(SCM_RIGHTS)` 经 unix socket 发出去。
-///
-/// 在 `pre_exec`（fork 后 exec 前）调用，**不能**使用任何堆分配或
-/// `std::io::Write`。本函数只操作栈上 POD（msghdr / iovec / cmsghdr / fd数组）。
-///
-/// 载荷是一个 magic byte `0x42`，让父端能确认消息完整收到。
-fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> std::io::Result<()> {
-    // iovec 描述载荷（1 字节 magic）。
-    let payload = CTRL_PAYLOAD;
-    let iov = libc::iovec {
-        iov_base: payload.as_ptr() as *mut _,
-        iov_len: payload.len(),
-    };
-
-    // cmsg 缓冲区：容纳一个 cmsghdr + 一个 i32 fd。
-    // CMSG_SPACE(sizeof(i32)) = align(cmsghdr + sizeof(i32)) = 24 字节（在 64 位）。
-    // 用 union 确保对齐。`libc::cmsghdr` 在不同 libc 版本上 padding 各异，
-    // 这里用 `MaybeUninit<u8>` 裸缓冲区 + `CMSG_SPACE` 算大小。
-    let cmsg_space = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as libc::c_uint) } as usize;
-    let mut cmsg_buf = [MaybeUninit::<u8>::uninit(); 64];
-    assert!(
-        cmsg_space <= cmsg_buf.len(),
-        "cmsg buffer too small: need {cmsg_space}, have {}",
-        cmsg_buf.len()
-    );
-
-    let msghdr = libc::msghdr {
-        msg_name: std::ptr::null_mut(),
-        msg_namelen: 0,
-        msg_iov: &iov as *const _ as *mut _,
-        msg_iovlen: 1,
-        msg_control: cmsg_buf.as_mut_ptr() as *mut _,
-        msg_controllen: cmsg_space as _,
-        msg_flags: 0,
-    };
-
-    // 把 cmsghdr 写入缓冲区头部，data 区域写 fd。
-    // SAFETY：
-    // - `cmsg_buf` 至少 `CMSG_SPACE(sizeof(fd))` 字节。
-    // - `CMSG_FIRSTHDR` 返回的指针位于该缓冲区内，对齐正确。
-    unsafe {
-        let cmsg_ptr = libc::CMSG_FIRSTHDR(&msghdr);
-        if cmsg_ptr.is_null() {
-            return Err(std::io::Error::last_os_error());
-        }
-        (*cmsg_ptr).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg_ptr).cmsg_type = SCM_RIGHTS;
-        (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(mem::size_of::<RawFd>() as libc::c_uint) as _;
-
-        // 把 fd 写到 cmsg data 区域。
-        let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *mut RawFd;
-        // 关键：必须把 fd 的**原始数值**写入 data；内核随后会在
-        // 收端自动 dup 一个新 fd 给收方。
-        std::ptr::write(data_ptr, fd_to_send);
-    }
-
-    // SAFETY：msghdr 完整初始化，iovec 与 cmsg 都在缓冲区有效期内。
-    let sent = unsafe { libc::sendmsg(socket_fd, &msghdr, 0) };
-    if sent < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 /// 从 unix socket 收一个 `SCM_RIGHTS` fd。
@@ -697,37 +532,6 @@ impl UserNotifHandle {
         if let Some(h) = self.worker.take() {
             let _ = h.join();
         }
-    }
-}
-
-/// PID namespace 的 init 进程（reaper）。
-///
-/// 循环 `waitpid(-1)` 收割所有子进程和托孤进程。
-/// 当业务进程（`business_pid`）退出时记录退出码，继续收割。
-/// 当 `waitpid` 返回 ECHILD（无子进程）时退出，返回业务进程退出码。
-///
-/// 参照 bwrap `do_init()` 的实现。
-fn do_reaper(business_pid: libc::pid_t) -> i32 {
-    // SAFETY: 全部 libc 调用都是 async-signal-safe 的 waitpid/macro。
-    // 此函数只在 fork 后的 PID 1 单线程子进程中调用。
-    unsafe {
-        let mut exit_code = 1;
-        loop {
-            let mut status: i32 = 0;
-            let wpid = libc::waitpid(-1, &mut status, 0);
-            if wpid == business_pid {
-                exit_code = if libc::WIFEXITED(status) {
-                    libc::WEXITSTATUS(status)
-                } else if libc::WIFSIGNALED(status) {
-                    128 + libc::WTERMSIG(status)
-                } else {
-                    1
-                };
-            } else if wpid < 0 {
-                break;
-            }
-        }
-        exit_code
     }
 }
 
