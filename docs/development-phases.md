@@ -23,16 +23,18 @@
 Phase 2 需在 `pre_exec` 中**先** `unshare`，**后**加载 seccomp filter，
 否则 unshare 会被自身拦截。
 
-## Phase 2b — eBPF 云容器后端（💡 未来扩展）
+## Phase 2b — IP 级网络过滤（⏸️ 已搁置，待 Phase 4 时重新评估）
 
-- aya eBPF 库集成
-- `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` connect 拦截
-- `BPF_MAP_TYPE_LPM_TRIE` 白名单 IP 前缀
-- 用户态 DNS 解析 + IP 集同步
-- 自动探测 Landlock → eBPF 降级
-- K8s/Docker 内验证
+> **搁置决策**（参考 `docs/arch/ebpf-network-filtering/context.md`）：
+> 本地 Agent 开发场景的网络隔离需求为二态（全有/全无），`unshare(CLONE_NEWNET)` + lo UP/DOWN 已覆盖威胁模型。
+> eBPF 网络过滤的维护成本（aya 依赖 + cgroup v2 + CAP_BPF）当前没有对应的场景驱动。
+> 如果 Phase 4（CodeWhale 云/容器集成）产生"仅允许特定 IP"的精确需求时再评估。
 
-Phase 2b 与 Phase 3、4 并行，不阻塞主线。
+选项：
+- **eBPF 路线**（原计划）：aya + `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` connect 拦截 + `BPF_MAP_TYPE_LPM_TRIE` 白名单 IP 前缀
+- **nftables 路线**（轻量替代）：在 netns 内注入 nftables 规则做 IP 过滤，无需 CAP_BPF
+
+Phase 2b 原与 Phase 3、4 并行，现明确降级为 Phase 4 的前置依赖。
 
 ## Phase 3 — macOS 支持（💡 计划中）
 
@@ -50,7 +52,9 @@ Phase 2b 与 Phase 3、4 并行，不阻塞主线。
 ## 阶段依赖关系
 
 ```
-Phase 1 (✅) ──→ Phase 2 (🚧) ──→ Phase 3 ──→ Phase 4
-                     │
-                     └─→ Phase 2b（独立分支，云场景）
+Phase 1 (✅) ──→ Phase 2 (🚧) ──→ Phase 3 ──→ Phase 4 ──→ Phase 2b (⏸️)
+                     │                                            ↑
+                     └── Phase 2 收尾（当前）──── NETLINK lo UP ────┘
 ```
+
+Phase 2b 从"独立并行分支"改为"Phase 4 的前置依赖"：只有当 Phase 4 云/容器集成启动且有 IP 级过滤的具体需求时，才重新评估 eBPF 或 nftables 方案。

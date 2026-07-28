@@ -18,7 +18,7 @@ use crate::{LandlockPerm, LandlockRule};
 pub struct SandboxConfig {
     pub landlock: Vec<LandlockRule>,
     pub namespaces: NamespacesConfig,
-    pub network_enabled: bool,
+    pub network: NetworkConfig,
     pub timeout_default_secs: u64,
     pub timeout_max_secs: u64,
     /// syscall 号列表，通过 USER_NOTIF 拦截（`--seccomp-deny-nr`）。
@@ -32,12 +32,30 @@ impl Default for SandboxConfig {
         Self {
             landlock: vec![],
             namespaces: NamespacesConfig::default(),
-            network_enabled: false,
+            network: NetworkConfig::default(),
             timeout_default_secs: 30,
             timeout_max_secs: 300,
             seccomp_deny_nrs: vec![],
             seccomp_filter_bytes: vec![],
         }
+    }
+}
+
+/// 网络配置。
+///
+/// 控制沙箱内的网络访问行为。
+#[derive(Debug, Clone, Default)]
+pub struct NetworkConfig {
+    /// 在隔离 netns 中放通 loopback（lo UP + 127.0.0.1/8）。
+    /// 仅在 `namespaces.net == true` 时生效。
+    pub loopback: bool,
+}
+
+impl NetworkConfig {
+    /// 启用或禁用 loopback 网络访问。
+    pub fn with_loopback(mut self, enabled: bool) -> Self {
+        self.loopback = enabled;
+        self
     }
 }
 
@@ -114,9 +132,9 @@ impl SandboxConfig {
         self
     }
 
-    /// 启用或禁用网络访问。
+    /// 启用或禁用网络访问（loopback 别名，兼容旧 API）。
     pub fn with_network(mut self, enabled: bool) -> Self {
-        self.network_enabled = enabled;
+        self.network.loopback = enabled;
         self
     }
 
@@ -372,8 +390,26 @@ mod tests {
     fn test_sandbox_config_default() {
         let config = SandboxConfig::default();
         assert!(config.landlock.is_empty());
-        assert!(!config.network_enabled);
+        assert!(!config.network.loopback);
         assert_eq!(config.timeout_default_secs, 30);
         assert_eq!(config.timeout_max_secs, 300);
+    }
+
+    #[test]
+    fn test_network_config() {
+        let config = SandboxConfig::default().with_network(true);
+        assert!(config.network.loopback);
+
+        let config = SandboxConfig::default().with_network(false);
+        assert!(!config.network.loopback);
+    }
+
+    #[test]
+    fn test_network_config_loopback() {
+        let config = SandboxConfig::default().with_network(true);
+        assert!(config.network.loopback);
+
+        let config = SandboxConfig::default().with_network(false);
+        assert!(!config.network.loopback);
     }
 }

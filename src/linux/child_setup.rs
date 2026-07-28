@@ -101,6 +101,7 @@ pub unsafe fn enter_child(
     gid_map_len: usize,
     hostname: *const u8,
     hostname_len: usize,
+    configure_lo: bool,
 ) {
     // ── 第 1 步：创建常规 namespace（不含 PID）────────────────────
     let mut user_ns_active = user_ns_active;
@@ -178,7 +179,12 @@ pub unsafe fn enter_child(
         namespaces::write_ns_file(b"/proc/self/gid_map\0", gid_slice).ok();
     }
 
-    // ── 第 6 步：sethostname ──────────────────────────────────
+    // ── 第 6 步：loopback 配置（netns 中 lo UP + 127.0.0.1/8）───
+    if configure_lo {
+        super::net::configure_loopback();
+    }
+
+    // ── 第 7 步：sethostname ──────────────────────────────────
     if hostname_len > 0 {
         // SAFETY: 调用方保证 hostname 有效且长度正确。
         let host_slice = std::slice::from_raw_parts(hostname, hostname_len);

@@ -37,6 +37,7 @@
 pub mod child_setup;
 pub mod landlock;
 pub mod namespaces;
+pub mod net;
 pub mod seccomp;
 
 use std::collections::HashMap;
@@ -233,6 +234,7 @@ impl SandboxImpl for LinuxSandbox {
             // SAFETY: 所有 raw pointer 引用的 backing storage（CString、Vec 等）
             // 都是本函数中的局部变量，在 child 中不会被 drop（因为只调 execve / _exit）。
             unsafe {
+                let configure_lo = ns.net && self.config.network.loopback;
                 child_setup::enter_child(
                     exec_path.as_ptr(),
                     argv.as_ptr(),
@@ -255,6 +257,7 @@ impl SandboxImpl for LinuxSandbox {
                     gid_map_content.len(),
                     hostname_bytes.as_ref().map(|h| h.as_ptr()).unwrap_or(std::ptr::null()),
                     hostname_bytes.as_ref().map(|h| h.len()).unwrap_or(0),
+                    configure_lo,
                 );
             }
         }

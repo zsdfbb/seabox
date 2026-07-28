@@ -34,9 +34,15 @@ pub enum ViolationDecision {
 
 允许用户通过 `SandboxConfig` 配置黑名单 syscall 的增删，在构建 BPF filter 时动态生成。数据模型的分类标签（`mount`/`debug`/`boot`/`module`/`namespace`/`bpf`）已预留。
 
-## 3. eBPF 云容器后端
+## 3. IP 级网络过滤
 
-详见 `linux-sandbox.md` 和 `development-phases.md` 的 Phase 2b。
+**已搁置**（`docs/arch/ebpf-network-filtering/context.md`），待 Phase 4 云/容器集成时有具体需求时重新评估。
+
+备选方案：
+- **eBPF 路线**：aya + `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` connect 拦截 + `BPF_MAP_TYPE_LPM_TRIE` 白名单 IP 前缀。需要 cgroup v2 + CAP_BPF。
+- **nftables 路线**：在隔离的 netns 内注入 nftables 规则，无需 CAP_BPF，但需要 `nsenter` 或父进程有 `CAP_NET_ADMIN`。
+
+详见 `development-phases.md` 的 Phase 2b。
 
 ## 4. PID namespace
 

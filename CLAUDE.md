@@ -38,7 +38,7 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 
 - ✅ **Phase 1**：Landlock 文件系统 ACL + seccomp BPF USER_NOTIF + CLI
 - ✅ **Phase 2**：6 种命名空间隔离（User/IPC/PID/Net/UTS/Cgroup）+ 动态 seccomp（`--seccomp-deny-nr` / `--seccomp-filter-fd`）+ 网络隔离与 loopback 控制
-- 🚧 **Phase 2b**：eBPF 网络过滤（aya，IP 级访问控制，与 Phase 3/4 并行）
+- ⏸️ **Phase 2b**：IP 级网络过滤（原计划 eBPF aya，已搁置待 Phase 4 时重新评估）
 - 🚧 **Phase 3**：macOS Seatbelt 支持
 - 🚧 **Phase 4**：CodeWhale 集成 + HTTP API
 
@@ -50,7 +50,7 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 | [docs/linux-sandbox.md](docs/linux-sandbox.md) | Linux 内核能力矩阵 + Landlock ABI + seccomp 动态策略 + namespaces |
 | [docs/macos-sandbox.md](docs/macos-sandbox.md) | macOS Seatbelt 设计（尚未实现） |
 | [docs/development-phases.md](docs/development-phases.md) | Phase 1-4 路线 + 依赖关系 + 当前状态 |
-| [docs/future-extensions.md](docs/future-extensions.md) | 动态授权 / eBPF / PID ns（路线预留） |
+| [docs/future-extensions.md](docs/future-extensions.md) | 动态授权 / 网络过滤 / PID ns（路线预留） |
 | [docs/adr/0001-seccomp-user-notif-vs-sigsys.md](docs/adr/0001-seccomp-user-notif-vs-sigsys.md) | ADR 001：seccomp USER_NOTIF vs SIGSYS handler |
 | [docs/adr/0002-config-landlock-rules.md](docs/adr/0002-config-landlock-rules.md) | ADR 002：SandboxConfig 扁平结构 + Raw Landlock 规则 |
 | [docs/adr/0003-fork-after-zero-heap.md](docs/adr/0003-fork-after-zero-heap.md) | ADR 003：fork 后子进程零堆操作（多线程 safe） |

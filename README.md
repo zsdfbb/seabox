@@ -283,7 +283,7 @@ Landlock / seccomp 测试在内核能力缺失时**自动跳过**（不是 fail�
 |---|---|---|
 | 1 | Core + Linux 文件系统隔离（Landlock + seccomp + CLI） | ✅ 已完成 |
 | 2 | Linux 完整进程隔离（user_ns + netns + 动态 seccomp） | 🚧 进行中 |
-| 2b | eBPF 云容器后端（aya + cgroup_sock_addr） | 💡 计划中 |
+| 2b | IP 级网络过滤（原 eBPF 计划，已搁置待 Phase 4 评估） | ⏸️ 已搁置 |
 | 3 | macOS 支持（Seatbelt） | 💡 计划中 |
 | 4 | CodeWhale 集成 + HTTP API | 💡 计划中 |
 

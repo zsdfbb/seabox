@@ -32,9 +32,13 @@ enum Cli {
         #[arg(long)]
         landlock: Vec<String>,
 
-        /// 允许网络访问
+        /// 允许网络访问（正交于 --unshare-net，同义于 --share-net）
         #[arg(short = 'n', long)]
         allow_network: bool,
+
+        /// 共享宿主机网络（bwrap 兼容别名，等价于 --allow-network）
+        #[arg(long)]
+        share_net: bool,
 
         /// 启用调试输出
         #[arg(short = 'd', long)]
@@ -139,6 +143,7 @@ fn main() -> anyhow::Result<()> {
         Cli::Run {
             landlock,
             allow_network,
+            share_net,
             debug,
             command,
             unshare_all,
@@ -164,6 +169,7 @@ fn main() -> anyhow::Result<()> {
         } => cmd_run(
             landlock,
             allow_network,
+            share_net,
             debug,
             command,
             unshare_all,
@@ -200,6 +206,7 @@ fn main() -> anyhow::Result<()> {
 fn cmd_run(
     landlock: Vec<String>,
     allow_network: bool,
+    share_net: bool,
     _debug: bool,
     command: Vec<String>,
     // namespace flags
@@ -244,14 +251,18 @@ fn cmd_run(
         anyhow::bail!("--hostname requires --unshare-uts or --unshare-all");
     }
 
+    let (effective_net, effective_network) = resolve_network_config(
+        unshare_net, share_net, allow_network, unshare_all,
+    );
+
     let mut config = build_config(
         landlock,
-        allow_network,
+        effective_network,
         unshare_all,
         unshare_user,
         unshare_ipc,
         unshare_pid,
-        unshare_net,
+        effective_net,
         unshare_uts,
         unshare_cgroup,
         unshare_user_try,
@@ -360,11 +371,29 @@ fn cmd_serve(port: u16) -> anyhow::Result<()> {
 // 配置辅助函数
 // ---------------------------------------------------------------------------
 
-/// 从 CLI flags 构建一个 [`SandboxConfig`]。
+/// 解析网络标志冲突，返回 (effective_net, effective_network)。
+///
+/// `--share-net` 或 `--allow-network` 会抑制 `--unshare-net`，使宿主机网络保持可用。
+/// 最后 flag 获胜。
+fn resolve_network_config(
+    unshare_net: bool,
+    share_net: bool,
+    allow_network: bool,
+    unshare_all: bool,
+) -> (bool, bool) {
+    if share_net || allow_network {
+        (false, true)
+    } else if unshare_net || unshare_all {
+        (true, false)
+    } else {
+        (false, false)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_config(
     landlock: Vec<String>,
-    allow_network: bool,
+    loopback_enabled: bool,
     // namespace flags
     unshare_all: bool,
     unshare_user: bool,
@@ -405,7 +434,9 @@ fn build_config(
             gid,
             hostname,
         },
-        network_enabled: allow_network,
+        network: sandbox_runtime::config::NetworkConfig {
+            loopback: loopback_enabled,
+        },
         timeout_default_secs: 30,
         timeout_max_secs: timeout_max.unwrap_or(300),
         seccomp_deny_nrs: vec![],

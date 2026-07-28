@@ -16,7 +16,7 @@
 | IPC 隔离 | `unshare(CLONE_NEWIPC)` | 2.6.24+ | ✅ Phase 2 |
 | 主机名隔离 | `unshare(CLONE_NEWUTS)` + `sethostname()` | 2.6.24+ | ✅ Phase 2 |
 | Cgroup 隔离 | `unshare(CLONE_NEWCGROUP)` | 4.6+ | ✅ Phase 2 |
-| eBPF 网络过滤 | `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` + aya | 4.10+, cgroup v2 | 📋 Phase 2b |
+| IP 级网络过滤 | `BPF_PROG_TYPE_CGROUP_SOCK_ADDR` + aya / nftables | 4.10+ / 6.8+ | ⏸️ 搁置，待 Phase 4 评估 |
 
 ## Landlock ABI 版本
 
