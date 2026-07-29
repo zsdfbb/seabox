@@ -36,6 +36,7 @@
 
 pub mod child_setup;
 pub mod landlock;
+pub mod mount;
 pub mod namespaces;
 pub mod net;
 pub mod seccomp;
@@ -49,7 +50,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
-use crate::config::SandboxConfig;
+use crate::config::{MountConfig, SandboxConfig};
 use crate::{CommandOutput, CommandSpec, ExitReason, SandboxImpl};
 
 // ---------------------------------------------------------------------------
@@ -162,6 +163,9 @@ impl SandboxImpl for LinuxSandbox {
             if effective_user {
                 v.push(child_setup::NsOp { flag: libc::CLONE_NEWUSER, try_mode: ns.user_try as i32 });
             }
+            if ns.mnt {
+                v.push(child_setup::NsOp { flag: libc::CLONE_NEWNS, try_mode: 0 });
+            }
             if ns.ipc {
                 v.push(child_setup::NsOp { flag: libc::CLONE_NEWIPC, try_mode: 0 });
             }
@@ -213,6 +217,15 @@ impl SandboxImpl for LinuxSandbox {
         // ── 解析程序路径（execve 不搜 PATH，需提前解析）──
         let exec_path = resolve_exec_path(&spec.program, &spec.env);
 
+        // ── 预计算 mount 操作 ──────────────────────────────────
+        let mount_config = &self.config.mount;
+        let has_mounts = !mount_config.specs.is_empty() || mount_config.enabled;
+        let (mount_ops, _mount_ops_cstrings) = prepare_mount_ops(mount_config)
+            .with_context(|| "failed to prepare mount ops")?;
+        let mount_ops_ptr = mount_ops.as_ptr();
+        let mount_ops_len = mount_ops.len();
+        let do_private = has_mounts;
+
         // ── 步骤 5：raw fork + 手动 setup ──────────────────────
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -258,6 +271,9 @@ impl SandboxImpl for LinuxSandbox {
                     hostname_bytes.as_ref().map(|h| h.as_ptr()).unwrap_or(std::ptr::null()),
                     hostname_bytes.as_ref().map(|h| h.len()).unwrap_or(0),
                     configure_lo,
+                    mount_ops_ptr,
+                    mount_ops_len,
+                    do_private,
                 );
             }
         }
@@ -420,6 +436,105 @@ fn resolve_exec_path(program: &str, spec_env: &HashMap<String, String>) -> CStri
         }
     }
     CString::new(program).unwrap_or_default()
+}
+
+/// fork 前将 [`MountConfig`] 中的规格预编码为子进程可见的
+/// `mount::RawMountOp` 数组。
+///
+/// 为每条 ops.`fstype` 对应的 CString 都存入 `cstrings` Vec 以防止提前 drop，
+/// 所有 `RawMountOp` 的指针指向 `cstrings` 中的稳定存储。
+///
+/// # CString 生命周期
+///
+/// 调用方必须保证返回的 `cstrings` Vec 在 `enter_child` 调用期间存活。
+/// `prepare_mount_ops` 预分配了足够容量避免后续 reallocation，
+/// 因此返回的 ops 指针在 `cstrings` 生命周期内稳定有效。
+fn prepare_mount_ops(config: &MountConfig) -> anyhow::Result<(Vec<mount::RawMountOp>, Vec<CString>)> {
+    // ── 预检：检查 source/target 路径存在性 ──────────────────────
+    for (i, spec) in config.specs.iter().enumerate() {
+        let target = std::path::Path::new(&spec.target);
+        if !target.exists() {
+            anyhow::bail!(
+                "mount #{}: target path '{}' does not exist",
+                i + 1, spec.target
+            );
+        }
+        if spec.fstype == "none" {
+            if let Some(ref src) = spec.source {
+                if !std::path::Path::new(src).exists() {
+                    anyhow::bail!(
+                        "mount #{}: source path '{}' does not exist",
+                        i + 1, src
+                    );
+                }
+            }
+        }
+    }
+
+    let mut cstrings: Vec<CString> = Vec::with_capacity(config.specs.len() * 2);
+    let mut ops: Vec<mount::RawMountOp> = Vec::new();
+
+    for spec in &config.specs {
+        match spec.fstype.as_str() {
+            "tmpfs" => {
+                cstrings.push(CString::new(spec.target.as_str()).unwrap_or_default());
+                cstrings.push(CString::new("tmpfs").unwrap_or_default());
+                ops.push(mount::RawMountOp {
+                    source: std::ptr::null(),
+                    target: cstrings[cstrings.len() - 2].as_ptr(),
+                    fstype: cstrings[cstrings.len() - 1].as_ptr(),
+                    flags: spec.flags as libc::c_ulong,
+                    data: std::ptr::null(),
+                });
+            }
+            "none" => {
+                let src = spec.source.as_deref().unwrap_or("");
+                cstrings.push(CString::new(spec.target.as_str()).unwrap_or_default());
+
+                if spec.readonly {
+                    cstrings.push(CString::new(src).unwrap_or_default());
+                    let target_ptr = cstrings[cstrings.len() - 2].as_ptr();
+                    let src_ptr = cstrings[cstrings.len() - 1].as_ptr();
+
+                    // 第一条: bind mount
+                    ops.push(mount::RawMountOp {
+                        source: src_ptr,
+                        target: target_ptr,
+                        fstype: std::ptr::null(),
+                        flags: spec.flags as libc::c_ulong,
+                        data: std::ptr::null(),
+                    });
+                    // 第二条: remount ro（bind + remount + rdonly + rec）
+                    ops.push(mount::RawMountOp {
+                        source: std::ptr::null(),
+                        target: target_ptr,
+                        fstype: std::ptr::null(),
+                        flags: (mount::MS_BIND
+                            | mount::MS_REMOUNT
+                            | mount::MS_RDONLY
+                            | mount::MS_REC)
+                            as libc::c_ulong,
+                        data: std::ptr::null(),
+                    });
+                } else {
+                    cstrings.push(CString::new(src).unwrap_or_default());
+                    let target_ptr = cstrings[cstrings.len() - 2].as_ptr();
+                    let src_ptr = cstrings[cstrings.len() - 1].as_ptr();
+
+                    ops.push(mount::RawMountOp {
+                        source: src_ptr,
+                        target: target_ptr,
+                        fstype: std::ptr::null(),
+                        flags: spec.flags as libc::c_ulong,
+                        data: std::ptr::null(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok((ops, cstrings))
 }
 
 // ---------------------------------------------------------------------------

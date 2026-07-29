@@ -54,6 +54,9 @@ enum Cli {
         /// IPC 命名空间隔离
         #[arg(long)]
         unshare_ipc: bool,
+        /// Mount 命名空间隔离（非 root 下需配合 --unshare-user）
+        #[arg(long)]
+        unshare_mnt: bool,
         /// PID 命名空间隔离
         #[arg(long)]
         unshare_pid: bool,
@@ -108,6 +111,18 @@ enum Cli {
         #[arg(long)]
         clearenv: bool,
 
+        /// 可写递归 bind mount。非 root 下需配合 --unshare-user
+        #[arg(long, value_names = ["SRC", "DST"], num_args = 2)]
+        bind: Vec<String>,
+
+        /// 只读递归 bind mount。非 root 下需配合 --unshare-user
+        #[arg(long, value_names = ["SRC", "DST"], num_args = 2)]
+        ro_bind: Vec<String>,
+
+        /// 挂载 tmpfs。非 root 下需配合 --unshare-user
+        #[arg(long, value_names = ["DST"])]
+        tmpfs: Vec<String>,
+
         /// 通过 USER_NOTIF 拦截指定 syscall 号（可重复）
         #[arg(long)]
         seccomp_deny_nr: Vec<u32>,
@@ -149,6 +164,7 @@ fn main() -> anyhow::Result<()> {
             unshare_all,
             unshare_user,
             unshare_ipc,
+            unshare_mnt,
             unshare_pid,
             unshare_net,
             unshare_uts,
@@ -162,6 +178,9 @@ fn main() -> anyhow::Result<()> {
             env: env_vars,
             unsetenv,
             clearenv,
+            ref bind,
+            ref ro_bind,
+            ref tmpfs,
             seccomp_deny_nr,
             seccomp_filter_fd,
             timeout,
@@ -175,6 +194,7 @@ fn main() -> anyhow::Result<()> {
             unshare_all,
             unshare_user,
             unshare_ipc,
+            unshare_mnt,
             unshare_pid,
             unshare_net,
             unshare_uts,
@@ -188,6 +208,9 @@ fn main() -> anyhow::Result<()> {
             env_vars,
             unsetenv,
             clearenv,
+            bind,
+            ro_bind,
+            tmpfs,
             seccomp_deny_nr,
             seccomp_filter_fd,
             timeout,
@@ -213,6 +236,7 @@ fn cmd_run(
     unshare_all: bool,
     unshare_user: bool,
     unshare_ipc: bool,
+    unshare_mnt: bool,
     unshare_pid: bool,
     unshare_net: bool,
     unshare_uts: bool,
@@ -226,6 +250,9 @@ fn cmd_run(
     env_vars: Vec<(String, String)>,
     unsetenv: Vec<String>,
     clearenv: bool,
+    bind: &[String],
+    ro_bind: &[String],
+    tmpfs: &[String],
     seccomp_deny_nrs: Vec<u32>,
     seccomp_filter_fds: Vec<std::os::unix::io::RawFd>,
     timeout: Option<u64>,
@@ -261,6 +288,7 @@ fn cmd_run(
         unshare_all,
         unshare_user,
         unshare_ipc,
+        unshare_mnt,
         unshare_pid,
         effective_net,
         unshare_uts,
@@ -272,6 +300,21 @@ fn cmd_run(
         hostname,
         timeout_max,
     )?;
+
+    // --bind / --ro-bind / --tmpfs: 添加 mount 规格
+    for pair in bind.chunks(2) {
+        if pair.len() == 2 {
+            config = config.with_bind(&pair[0], &pair[1]);
+        }
+    }
+    for pair in ro_bind.chunks(2) {
+        if pair.len() == 2 {
+            config = config.with_ro_bind(&pair[0], &pair[1]);
+        }
+    }
+    for target in tmpfs {
+        config = config.with_tmpfs(target);
+    }
 
     // --seccomp-deny-nr: 添加 syscall 号到配置
     for nr in seccomp_deny_nrs {
@@ -398,6 +441,7 @@ fn build_config(
     unshare_all: bool,
     unshare_user: bool,
     unshare_ipc: bool,
+    unshare_mnt: bool,
     unshare_pid: bool,
     unshare_net: bool,
     unshare_uts: bool,
@@ -424,6 +468,7 @@ fn build_config(
         namespaces: NamespacesConfig {
             user: effective_user,
             ipc: unshare_ipc || unshare_all,
+            mnt: unshare_mnt || unshare_all,
             pid: unshare_pid || unshare_all,
             net: unshare_net || unshare_all,
             uts: unshare_uts || unshare_all,
@@ -437,6 +482,7 @@ fn build_config(
         network: sandbox_runtime::config::NetworkConfig {
             loopback: loopback_enabled,
         },
+        mount: sandbox_runtime::config::MountConfig::default(),
         timeout_default_secs: 30,
         timeout_max_secs: timeout_max.unwrap_or(300),
         seccomp_deny_nrs: vec![],

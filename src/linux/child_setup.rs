@@ -11,6 +11,7 @@
 use std::mem::MaybeUninit;
 use std::os::unix::io::RawFd;
 
+use super::mount::RawMountOp;
 use super::namespaces;
 use super::seccomp;
 
@@ -57,16 +58,17 @@ pub struct ExtFilterDesc {
 /// fork 后子进程的完整初始化流程。
 ///
 /// 依次执行：
-/// 1. `unshare()` 创建常规 namespace（user/ipc/net/uts/cgroup）
-/// 2. double-fork + reaper（PID namespace 需要）
-/// 3. `chdir()`（工作目录）
-/// 4. `prctl(PR_SET_NO_NEW_PRIVS)`
-/// 5. uid/gid map 写入 `/proc/self/uid_map` 等（user ns 需要）
-/// 6. `sethostname()`（UTS 需要）
-/// 7. `landlock_restrict_self()`（Landlock 规则需要）
-/// 8. seccomp USER_NOTIF filter 安装 + `sendmsg(SCM_RIGHTS)`
-/// 9. 外部 plain BPF filter 安装
-/// 10. `execve()` 启动目标程序
+/// 1. `unshare()` 创建常规 namespace（user/mnt/ipc/net/uts/cgroup）
+/// 2. mount namespace 初始化（make_private + do_mounts）
+/// 3. double-fork + reaper（PID namespace 需要）
+/// 4. `chdir()`（工作目录）
+/// 5. `prctl(PR_SET_NO_NEW_PRIVS)`
+/// 6. uid/gid map 写入 `/proc/self/uid_map` 等（user ns 需要）
+/// 7. `sethostname()`（UTS 需要）
+/// 8. `landlock_restrict_self()`（Landlock 规则需要）
+/// 9. seccomp USER_NOTIF filter 安装 + `sendmsg(SCM_RIGHTS)`
+/// 10. 外部 plain BPF filter 安装
+/// 11. `execve()` 启动目标程序
 ///
 /// # Safety
 ///
@@ -76,6 +78,7 @@ pub struct ExtFilterDesc {
 /// - `ns_ops` / `ext_filters` 数组中的所有指针同样有效
 /// - `uid_map` / `gid_map` 的内容格式符合 `/proc/self/*_map` 要求
 /// - `hostname` 是合法的主机名字节序列（长度 <= 64）
+/// - `mount_ops` 数组中的所有 `RawMountOp` 指针指向 fork 前预分配的 CString 存储
 ///
 /// 此函数永远不返回：要么通过 `execve` 转为目标程序，要么 `_exit`。
 #[allow(clippy::too_many_arguments)]
@@ -102,6 +105,9 @@ pub unsafe fn enter_child(
     hostname: *const u8,
     hostname_len: usize,
     configure_lo: bool,
+    mount_ops: *const RawMountOp,
+    mount_ops_len: usize,
+    do_private: bool,
 ) {
     // ── 第 1 步：创建常规 namespace（不含 PID）────────────────────
     let mut user_ns_active = user_ns_active;
@@ -119,6 +125,17 @@ pub unsafe fn enter_child(
             if (op.flag & libc::CLONE_NEWUSER) != 0 {
                 user_ns_active = true;
             }
+        }
+    }
+
+    // ── 第 2 步：mount namespace 初始化 ─────────────────────
+    if do_private {
+        super::mount::make_private();
+    }
+    if mount_ops_len > 0 {
+        let r = super::mount::do_mounts(mount_ops, mount_ops_len);
+        if r != 0 {
+            libc::_exit(1);
         }
     }
 

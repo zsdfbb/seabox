@@ -7,6 +7,12 @@
 
 use crate::{LandlockPerm, LandlockRule};
 
+// mount(2) flags 数值（不依赖 libc，config 层不需要 libc）
+const MS_BIND: u64 = 4096;
+const MS_REC: u64 = 16384;
+const MS_NOSUID: u64 = 2;
+const MS_NODEV: u64 = 4;
+
 // ---------------------------------------------------------------------------
 // SandboxConfig
 // ---------------------------------------------------------------------------
@@ -19,6 +25,7 @@ pub struct SandboxConfig {
     pub landlock: Vec<LandlockRule>,
     pub namespaces: NamespacesConfig,
     pub network: NetworkConfig,
+    pub mount: MountConfig,
     pub timeout_default_secs: u64,
     pub timeout_max_secs: u64,
     /// syscall 号列表，通过 USER_NOTIF 拦截（`--seccomp-deny-nr`）。
@@ -33,6 +40,7 @@ impl Default for SandboxConfig {
             landlock: vec![],
             namespaces: NamespacesConfig::default(),
             network: NetworkConfig::default(),
+            mount: MountConfig::default(),
             timeout_default_secs: 30,
             timeout_max_secs: 300,
             seccomp_deny_nrs: vec![],
@@ -57,6 +65,74 @@ impl NetworkConfig {
         self.loopback = enabled;
         self
     }
+}
+
+// ---------------------------------------------------------------------------
+// MountSpec & MountConfig
+// ---------------------------------------------------------------------------
+
+/// 单条 mount 操作规格。
+#[derive(Debug, Clone)]
+pub struct MountSpec {
+    /// 源路径（tmpfs 时为 None）。
+    pub source: Option<String>,
+    /// 挂载目标路径。
+    pub target: String,
+    /// 文件系统类型（"none" = bind mount, "tmpfs" = tmpfs）。
+    pub fstype: String,
+    /// mount(2) flags（MS_BIND, MS_REC, MS_RDONLY 等）。
+    pub flags: u64,
+    /// 可选 data 字符串（如 "size=1G"）。
+    pub data: Option<String>,
+    /// 是否只读（ro_bind 用，父进程据此展开为两条 RawMountOp）。
+    pub readonly: bool,
+}
+
+impl MountSpec {
+    /// 创建一条 bind mount 规格（读写）。
+    pub fn bind(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            source: Some(source.into()),
+            target: target.into(),
+            fstype: "none".into(),
+            flags: MS_BIND | MS_REC,
+            data: None,
+            readonly: false,
+        }
+    }
+
+    /// 创建一条只读 bind mount 规格（ro_bind，父进程展开为 bind + readonly remount）。
+    pub fn ro_bind(source: impl Into<String>, target: impl Into<String>) -> Self {
+        Self {
+            source: Some(source.into()),
+            target: target.into(),
+            fstype: "none".into(),
+            flags: MS_BIND | MS_REC,
+            data: None,
+            readonly: true,
+        }
+    }
+
+    /// 创建一条 tmpfs mount 规格。
+    pub fn tmpfs(target: impl Into<String>) -> Self {
+        Self {
+            source: None,
+            target: target.into(),
+            fstype: "tmpfs".into(),
+            flags: MS_NOSUID | MS_NODEV,
+            data: None,
+            readonly: false,
+        }
+    }
+}
+
+/// Mount 配置。
+#[derive(Debug, Clone, Default)]
+pub struct MountConfig {
+    /// 明确要求 unshare mount ns（当 specs 为空时仍可设置）。
+    pub enabled: bool,
+    /// mount 操作列表。
+    pub specs: Vec<MountSpec>,
 }
 
 impl SandboxConfig {
@@ -103,10 +179,11 @@ impl SandboxConfig {
         self
     }
 
-    /// 启用全部命名空间隔离（user/ipc/pid/net/uts/cgroup）。
+    /// 启用全部命名空间隔离（user/ipc/mnt/pid/net/uts/cgroup）。
     pub fn with_unshare_all(mut self) -> Self {
         self.namespaces.user = true;
         self.namespaces.ipc = true;
+        self.namespaces.mnt = true;
         self.namespaces.pid = true;
         self.namespaces.net = true;
         self.namespaces.uts = true;
@@ -135,6 +212,33 @@ impl SandboxConfig {
     /// 启用或禁用网络访问（loopback 别名，兼容旧 API）。
     pub fn with_network(mut self, enabled: bool) -> Self {
         self.network.loopback = enabled;
+        self
+    }
+
+    /// 启用 mount 命名空间隔离。
+    pub fn with_unshare_mnt(mut self) -> Self {
+        self.namespaces.mnt = true;
+        self
+    }
+
+    /// 添加一条 bind mount 规格，并自动启用 mount 命名空间。
+    pub fn with_bind(mut self, source: &str, target: &str) -> Self {
+        self.mount.specs.push(MountSpec::bind(source, target));
+        self.namespaces.mnt = true;
+        self
+    }
+
+    /// 添加一条只读 bind mount 规格，并自动启用 mount 命名空间。
+    pub fn with_ro_bind(mut self, source: &str, target: &str) -> Self {
+        self.mount.specs.push(MountSpec::ro_bind(source, target));
+        self.namespaces.mnt = true;
+        self
+    }
+
+    /// 添加一条 tmpfs mount 规格，并自动启用 mount 命名空间。
+    pub fn with_tmpfs(mut self, target: &str) -> Self {
+        self.mount.specs.push(MountSpec::tmpfs(target));
+        self.namespaces.mnt = true;
         self
     }
 
@@ -177,6 +281,8 @@ pub struct NamespacesConfig {
     pub user: bool,
     /// 隔离 IPC 命名空间。
     pub ipc: bool,
+    /// 隔离 mount 命名空间。
+    pub mnt: bool,
     /// 隔离 PID 命名空间。
     pub pid: bool,
     /// 隔离网络命名空间。
@@ -348,6 +454,7 @@ mod tests {
         let ns = NamespacesConfig::default();
         assert!(!ns.user);
         assert!(!ns.ipc);
+        assert!(!ns.mnt);
         assert!(!ns.pid);
         assert!(!ns.net);
         assert!(!ns.uts);
@@ -373,6 +480,7 @@ mod tests {
         let config = SandboxConfig::default().with_unshare_all();
         assert!(config.namespaces.user);
         assert!(config.namespaces.ipc);
+        assert!(config.namespaces.mnt);
         assert!(config.namespaces.pid);
         assert!(config.namespaces.net);
         assert!(config.namespaces.uts);
@@ -411,5 +519,41 @@ mod tests {
 
         let config = SandboxConfig::default().with_network(false);
         assert!(!config.network.loopback);
+    }
+
+    #[test]
+    fn test_mount_config() {
+        let config = SandboxConfig::default()
+            .with_bind("/src", "/dst")
+            .with_tmpfs("/tmp");
+        assert!(config.namespaces.mnt);
+        assert_eq!(config.mount.specs.len(), 2);
+    }
+
+    #[test]
+    fn test_mount_spec_bind() {
+        let spec = MountSpec::bind("/host/src", "/container/dst");
+        assert_eq!(spec.source, Some("/host/src".into()));
+        assert_eq!(spec.target, "/container/dst");
+        assert_eq!(spec.fstype, "none");
+        assert_eq!(spec.flags, (MS_BIND | MS_REC) as u64);
+        assert!(!spec.readonly);
+    }
+
+    #[test]
+    fn test_mount_spec_ro_bind() {
+        let spec = MountSpec::ro_bind("/host/src", "/container/dst");
+        assert_eq!(spec.source, Some("/host/src".into()));
+        assert_eq!(spec.target, "/container/dst");
+        assert!(spec.readonly);
+    }
+
+    #[test]
+    fn test_mount_spec_tmpfs() {
+        let spec = MountSpec::tmpfs("/mnt/tmp");
+        assert!(spec.source.is_none());
+        assert_eq!(spec.target, "/mnt/tmp");
+        assert_eq!(spec.fstype, "tmpfs");
+        assert_eq!(spec.flags, (MS_NOSUID | MS_NODEV) as u64);
     }
 }
