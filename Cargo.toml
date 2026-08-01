@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 default-run = "seabox"
 description = "A standalone Rust sandbox tool using Landlock + seccomp for filesystem and syscall isolation"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/zsdfbb/seabox"
+keywords = ["sandbox", "landlock", "seccomp", "isolation", "security"]
+categories = ["command-line-utilities", "os"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
