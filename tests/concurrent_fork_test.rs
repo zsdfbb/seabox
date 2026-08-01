@@ -1,4 +1,4 @@
-use sandbox_runtime::{CommandSpec, Sandbox};
+use seabox::{CommandSpec, Sandbox};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -9,7 +9,7 @@ use std::thread;
 /// 如果 child 碰了堆，会死锁。test timeout 兜底。
 #[test]
 fn concurrent_fork_stress() {
-    use sandbox_runtime::SandboxConfig;
+    use seabox::SandboxConfig;
     let sandbox = Sandbox::from_config(SandboxConfig::default()).unwrap();
     let ready = Arc::new(Barrier::new(3));
 

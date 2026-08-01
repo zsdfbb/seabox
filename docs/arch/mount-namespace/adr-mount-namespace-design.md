@@ -8,7 +8,7 @@
 
 ## 背景
 
-sandbox-runtime 当前使用 Landlock ACL 做文件系统权限控制。Landlock 控制"能读/写哪些路径"，但不能控制"能看到什么路径"。讨论确认：多 Agent 场景、工具版本隔离、ephemeral 全局安装等需求需要 mount namespace 提供的**视图隔离**能力。
+seabox 当前使用 Landlock ACL 做文件系统权限控制。Landlock 控制"能读/写哪些路径"，但不能控制"能看到什么路径"。讨论确认：多 Agent 场景、工具版本隔离、ephemeral 全局安装等需求需要 mount namespace 提供的**视图隔离**能力。
 
 ## 设计方案评估
 

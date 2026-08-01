@@ -98,7 +98,7 @@ pub fn configure_loopback() {
         // SAFETY: write(2) 是 async-signal-safe 的。
         unsafe {
             let stderr = libc::STDERR_FILENO;
-            let prefix = b"[sandbox-runtime] network: ";
+            let prefix = b"[seabox] network: ";
             libc::write(stderr, prefix.as_ptr() as *const _, prefix.len());
             libc::write(stderr, msg.as_ptr() as *const _, msg.len());
             libc::write(stderr, b"\n" as *const _ as *const _, 1);

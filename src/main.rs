@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use sandbox_runtime::config::{parse_landlock_spec, NamespacesConfig, SandboxConfig};
-use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
+use seabox::config::{parse_landlock_spec, NamespacesConfig, SandboxConfig};
+use seabox::{CommandSpec, ExitReason, Sandbox};
 
 /// 解析 `KEY=VALUE` 格式的环境变量，返回 `(key, value)`。
 fn parse_env_var(s: &str) -> Result<(String, String), String> {
@@ -24,7 +24,7 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
 
 #[derive(Parser)]
 #[command(
-    name = "sandbox-runtime",
+    name = "seabox",
     about = "Landlock + seccomp + namespace 沙箱",
     long_about = "\
 为 AI Agent（Claude Code、CodeWhale、Cursor……）设计的 Linux 沙箱。\
@@ -191,8 +191,8 @@ enum Cli {
 
         /// 要执行的命令（使用 `--` 分隔选项与命令）
         ///
-        /// 示例：sandbox-runtime run --landlock '/:ro' -- ls -la
-        ///        sandbox-runtime run --unshare-all -- sh -c 'echo hello'
+        /// 示例：seabox run --landlock '/:ro' -- ls -la
+        ///        seabox run --unshare-all -- sh -c 'echo hello'
         /// 注意：本工具直接 execve 目标程序，不解释 shell 元字符 (>, |, &&)。
         /// 需要 shell 语法时显式调用 sh -c。
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -327,8 +327,8 @@ fn cmd_run(
     if command.is_empty() {
         anyhow::bail!(
             "error: no command specified.\n\
-             Usage: sandbox-runtime run [OPTIONS] <COMMAND>...\n\
-             For example: sandbox-runtime run ls -la"
+             Usage: seabox run [OPTIONS] <COMMAND>...\n\
+             For example: seabox run ls -la"
         );
     }
 
@@ -447,7 +447,7 @@ fn cmd_run(
         }
         ExitReason::Program(code) => {
             if code != 0 {
-                eprintln!("[sandbox-runtime] command failed (exit code {code})");
+                eprintln!("[seabox] command failed (exit code {code})");
             }
             std::process::exit(code)
         }
@@ -463,7 +463,7 @@ fn cmd_run(
 // ---------------------------------------------------------------------------
 
 fn cmd_check() -> anyhow::Result<()> {
-    print!("{}", sandbox_runtime::check_capabilities());
+    print!("{}", seabox::check_capabilities());
     Ok(())
 }
 
@@ -544,10 +544,10 @@ fn build_config(
             gid,
             hostname,
         },
-        network: sandbox_runtime::config::NetworkConfig {
+        network: seabox::config::NetworkConfig {
             loopback: loopback_enabled,
         },
-        mount: sandbox_runtime::config::MountConfig::default(),
+        mount: seabox::config::MountConfig::default(),
         timeout_default_secs: 30,
         timeout_max_secs: timeout_max.unwrap_or(300),
         seccomp_deny_nrs: vec![],

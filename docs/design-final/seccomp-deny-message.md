@@ -22,7 +22,7 @@
 ### 2.1 数据流图（USER_NOTIF 路径）
 
 ```
-父进程 (sandbox-runtime)
+父进程 (seabox)
   │
   ├─ 1. build_blacklist_filter()           (n+6 BPF 指令，末位 SECCOMP_RET_USER_NOTIF)
   ├─ 2. socketpair(AF_UNIX, SOCK_SEQPACKET) → [parent_fd, child_fd]
@@ -68,7 +68,7 @@ fork()
   ├─ exit_code = 0（黑名单 syscall 返回 EPERM，进程正常退出）
   ├─ blocked_val = Some((nr, arch))         ◄── 从共享 Arc<Mutex> 读出
   ├─ CommandOutput.stderr 前缀追加 marker 行：
-  │     "[sandbox-runtime:blocked] Blocked by seccomp filter (SIGSYS):
+  │     "[seabox:blocked] Blocked by seccomp filter (SIGSYS):
   │      syscall='mount' category='mount' nr=165 arch=0xc000003e
   │      reason=blacklist signal=SIGSYS\n"
   └─ CommandOutput.blocked_syscall = Some((165, 0xc000003e))
@@ -90,7 +90,7 @@ main.rs → sandbox.classify_exit(exit_code, stderr, blocked_syscall)
 | recvmsg | `src/linux/mod.rs::recv_fd` | worker 线程从父端 socketpair 收 listener fd |
 | worker thread | `src/linux/mod.rs::run_user_notif_worker` | `ioctl(RECV/SEND)` 循环；记录 `(nr, arch)` 到共享 `Arc<Mutex>` |
 | shared blocked | `Arc<Mutex<Option<(u32, u32)>>>` | worker 写入 → `execute` reap 时读取 |
-| marker 前缀 | `BLOCKED_MARKER_PREFIX = "[sandbox-runtime:blocked] "` | 写入 stderr 头部；纯字符串消费者按行扫描即可识别 |
+| marker 前缀 | `BLOCKED_MARKER_PREFIX = "[seabox:blocked] "` | 写入 stderr 头部；纯字符串消费者按行扫描即可识别 |
 
 ---
 
@@ -286,13 +286,13 @@ Sandbox denial (Seccomp): Blocked by seccomp filter (SIGSYS): syscall='mount' ca
 
 **替代方案：** 改用 `SECCOMP_RET_USER_NOTIF`（kernel 5.0+）。拦截事件完全在父进程侧处理：子进程 syscall 入口被内核阻塞，父进程 worker 线程从 listener fd 读取 `(nr, arch)` 并通过 `SECCOMP_IOCTL_NOTIF_SEND` 强制以 `EPERM` 返回。**execve 完全不影响父进程侧的结构化数据通道**，因为 listener fd 引用已被父进程持有。
 
-**取舍：** USER_NOTIF 要求 kernel 5.0+，覆盖了 sandbox-runtime-rs 既有策略的最低版本（Linux 5.13+ Landlock ABI v1 → 实际部署至少 5.13，远高于 5.0）。
+**取舍：** USER_NOTIF 要求 kernel 5.0+，覆盖了 seabox 既有策略的最低版本（Linux 5.13+ Landlock ABI v1 → 实际部署至少 5.13，远高于 5.0）。
 
 ### 6.2 `/proc/<pid>/syscall` peek 路径失效
 
 **第二尝试（实现后废弃）：** 既然子进程不能写 marker，就让父进程在 SIGSYS 杀子进程后读 `/proc/<pid>/syscall`（含 zombie 状态信息），把 `nr` + `arch` 喂给 `classify_exit`。
 
-**根因：** Yama `ptrace_scope=1`（Ubuntu/Debian 默认）下，进程死后 owner 切换为 `root`，`/proc/<pid>/syscall` mode 变 `400`，仅 `CAP_SYS_PTRACE` 持有者可读。sandbox-runtime-rs 是非特权用户态进程，无法读取——`peek_blocked_syscall` 在绝大多数发行版上 100% 失败（实测 Ubuntu 22.04 / Fedora 39）。
+**根因：** Yama `ptrace_scope=1`（Ubuntu/Debian 默认）下，进程死后 owner 切换为 `root`，`/proc/<pid>/syscall` mode 变 `400`，仅 `CAP_SYS_PTRACE` 持有者可读。seabox 是非特权用户态进程，无法读取——`peek_blocked_syscall` 在绝大多数发行版上 100% 失败（实测 Ubuntu 22.04 / Fedora 39）。
 
 **替代方案：** USER_NOTIF 路径直接在子进程**未死**时由父进程读 `seccomp_notif.data.{nr,arch}`，绕过 `/proc` 的权限检查。
 
@@ -502,7 +502,7 @@ cargo fmt --check                  → 0 diff
 
 ### 9.6 USER_NOTIF 与 Landlock 的 stderr 顺序
 
-**现状：** marker 行 `[sandbox-runtime:blocked] ...` 写在 `stderr` 头部，原 child stderr 在后。如果子进程自身也写了以该 prefix 开头的行（极不可能），`classify_exit` 优先级 2 可能误报。
+**现状：** marker 行 `[seabox:blocked] ...` 写在 `stderr` 头部，原 child stderr 在后。如果子进程自身也写了以该 prefix 开头的行（极不可能），`classify_exit` 优先级 2 可能误报。
 
 **缓解：** prefix 含方括号 `[]`，子进程自然输出的概率为零；可接受的风险。
 
@@ -531,7 +531,7 @@ USER_NOTIF worker 线程在子进程**正常退出**时死锁：`ioctl(SECCOMP_I
 
 **触发条件：** 任何走 `execute()` 但子进程正常退出的场景。
 
-**暴露路径：** `cargo test --tests --examples` 等命令若包含普通命令会卡住；用户手动执行 `sandbox-runtime run -- /bin/true` 同样卡住。
+**暴露路径：** `cargo test --tests --examples` 等命令若包含普通命令会卡住；用户手动执行 `seabox run -- /bin/true` 同样卡住。
 
 ### 修复
 
@@ -585,7 +585,7 @@ notif_handle.join();
 - `cargo test --lib`：39 passed
 - `cargo test --test deny_detect_test`：11 passed
 - `cargo clippy --tests -- -D warnings`：0 warning
-- `./target/release/sandbox-runtime run --policy full-access -- /bin/true`：exit=0，无 hang
+- `./target/release/seabox run --policy full-access -- /bin/true`：exit=0，无 hang
 
 ### 经验教训
 

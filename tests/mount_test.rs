@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use sandbox_runtime::linux::mount;
-use sandbox_runtime::linux::namespaces;
+use seabox::linux::mount;
+use seabox::linux::namespaces;
 
 // ---------------------------------------------------------------------------
 // 计数器：生成集成测试内的唯一路径
@@ -52,7 +52,7 @@ fn create_temp_dir(label: &str) -> PathBuf {
 
 /// 由 Cargo 在集成测试中自动注入的二进制绝对路径。
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_sandbox-runtime")
+    env!("CARGO_BIN_EXE_seabox")
 }
 
 /// 子进程结果。
@@ -64,14 +64,14 @@ struct RunOutput {
     stderr: String,
 }
 
-/// 以子进程方式调用 `sandbox-runtime`，捕获退出码与双向输出。
+/// 以子进程方式调用 `seabox`，捕获退出码与双向输出。
 fn run_cli(args: &[&str]) -> RunOutput {
     let output = Command::new(bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to spawn sandbox-runtime binary");
+        .expect("failed to spawn seabox binary");
 
     RunOutput {
         exit_code: output.status.code(),

@@ -102,7 +102,7 @@ fn resolve_exec_path(program: &str) -> CString {
 
 ```
 实际场景：
-  sandbox-runtime run --env PATH=/custom/path -- mytool
+  seabox run --env PATH=/custom/path -- mytool
 
 期望行为：在 /custom/path 中搜索 mytool
 当前设计：在 parent 的 PATH（/usr/bin:/bin）中搜索 → 找到 /usr/bin/mytool（可能不存在或不同版本）

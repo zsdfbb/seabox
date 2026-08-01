@@ -2,7 +2,7 @@
 //!
 //! 这些测试需要 Linux 5.13+ 且内核编译了 Landlock
 //!（`CONFIG_SECURITY_LANDLOCK=y`, `lsm=landlock`）。在没有 Landlock 支持
-//! 的内核上，测试会在运行时通过 `sandbox_runtime::linux::landlock::is_available()`
+//! 的内核上，测试会在运行时通过 `seabox::linux::landlock::is_available()`
 //! 跳过自身。
 //!
 //! 测试用例：
@@ -21,11 +21,11 @@
 //!    拒绝测试改用 `/var/tmp` 下临时创建的目标目录——它存在、不在
 //!    WorkspaceWrite 默认可写集合（`/tmp` + cwd + allow_write）中。
 //! 3. **清理**：所有在主机文件系统上创建的目标，都用 PID 化路径并在
-//!    测试末尾 best-effort 删除；用 `.sandbox_runtime_*` 前缀便于人工
+//!    测试末尾 best-effort 删除；用 `.seabox_*` 前缀便于人工
 //!    排查残留。
 
 // 本文件仅在 Linux 下编译，因为它依赖
-// `sandbox_runtime::linux::LinuxSandbox` 与 `sandbox_runtime::linux::landlock`。
+// `seabox::linux::LinuxSandbox` 与 `seabox::linux::landlock`。
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
@@ -34,12 +34,12 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{CommandSpec, LandlockPerm, LandlockRule, Sandbox};
+use seabox::config::SandboxConfig;
+use seabox::{CommandSpec, LandlockPerm, LandlockRule, Sandbox};
 
 /// 检查运行中的内核是否支持 Landlock。
 fn is_landlock_available() -> bool {
-    sandbox_runtime::linux::landlock::is_available()
+    seabox::linux::landlock::is_available()
 }
 
 /// 辅助函数：创建一个默认配置的 Sandbox。
@@ -53,7 +53,7 @@ fn make_sandbox() -> Sandbox {
 
 /// Cargo 在集成测试中自动注入的二进制绝对路径。
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_sandbox-runtime")
+    env!("CARGO_BIN_EXE_seabox")
 }
 
 /// 调用 CLI 二进制后的捕获结果。
@@ -63,14 +63,14 @@ struct CliOutput {
     stderr: String,
 }
 
-/// 以子进程方式调用 `sandbox-runtime`，继承当前 cwd。
+/// 以子进程方式调用 `seabox`，继承当前 cwd。
 fn run_cli(args: &[&str]) -> CliOutput {
     let output = Command::new(bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to spawn sandbox-runtime binary");
+        .expect("failed to spawn seabox binary");
 
     CliOutput {
         exit_code: output.status.code(),
@@ -82,7 +82,7 @@ fn run_cli(args: &[&str]) -> CliOutput {
 /// 生成进程唯一的路径名，避免与并发/历史运行残留冲突。
 fn unique_path(prefix: &str) -> PathBuf {
     let pid = std::process::id();
-    PathBuf::from(format!("/tmp/.sandbox_runtime_{prefix}_{pid}"))
+    PathBuf::from(format!("/tmp/.seabox_{prefix}_{pid}"))
 }
 
 /// 与 `unique_path` 类似，但落到 `/var/tmp`——用于需要"位于 WorkspaceWrite
@@ -90,7 +90,7 @@ fn unique_path(prefix: &str) -> PathBuf {
 /// Linux 上都存在，且不在 WorkspaceWrite 的默认可写集合中。
 fn unique_path_in_var_tmp(prefix: &str) -> PathBuf {
     let pid = std::process::id();
-    PathBuf::from(format!("/var/tmp/.sandbox_runtime_{prefix}_{pid}"))
+    PathBuf::from(format!("/var/tmp/.seabox_{prefix}_{pid}"))
 }
 
 /// Best-effort 删除路径（文件或目录）。用于测试后清理。
@@ -314,7 +314,7 @@ fn read_only_blocks_write() {
 }
 
 // ---------------------------------------------------------------------------
-// CLI 二进制测试：以子进程方式调用 sandbox-runtime 二进制，验证 wrapper
+// CLI 二进制测试：以子进程方式调用 seabox 二进制，验证 wrapper
 // 的 Landlock 拒绝路径、退出码、stderr 消息格式。
 // ---------------------------------------------------------------------------
 
@@ -361,7 +361,7 @@ fn cli_read_only_blocks_write_with_exit_126() {
 // 风险控制：
 // - 用 `skip_unless_landlock_active()` 预检，确保 Landlock 在拦截；
 //   探针失败则跳过，不会触碰任何主机路径。
-// - 目标路径选 `/var/tmp/.sandbox_runtime_landlock_test_<pid>`：
+// - 目标路径选 `/var/tmp/.seabox_landlock_test_<pid>`：
 //   /var/tmp 在所有 Linux 上存在，但 `/:ro` 下不可写。
 // - 测试开始前创建该空目录（这样目标路径已存在，写操作不因 ENOENT 失败）；
 //   测试结束后 best-effort 删除整个目录。

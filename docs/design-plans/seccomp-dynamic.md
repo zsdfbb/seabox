@@ -16,9 +16,9 @@
 ## 2. CLI 接口
 
 ```
-sandbox-runtime run --seccomp-deny-nr 165 -- ls          # 拦截 mount
-sandbox-runtime run --seccomp-filter-fd 3 -- ls 3< x.bpf # 外部 BPF
-sandbox-runtime run --seccomp-deny-nr 165 --seccomp-filter-fd 3 -- ls 3< x.bpf  # 混合
+seabox run --seccomp-deny-nr 165 -- ls          # 拦截 mount
+seabox run --seccomp-filter-fd 3 -- ls 3< x.bpf # 外部 BPF
+seabox run --seccomp-deny-nr 165 --seccomp-filter-fd 3 -- ls 3< x.bpf  # 混合
 ```
 
 - `--seccomp-deny-nr`：可重复，每个指定一个 syscall 号

@@ -1,7 +1,7 @@
 # Execution Plan: seccomp 拒绝消息携带 syscall 名 + category
 
 > **设计来源：** `/home/zs/.claude/plans/snug-churning-kazoo.md`（已批准，`full` 编排）
-> **设计归档：** `/home/zs/Develop/sandbox-runtime-rs/docs/design-plans/feat-seccomp-deny-message.md`（由 design-plan subagent 同步产出）
+> **设计归档：** `/home/zs/Develop/seabox/docs/design-plans/feat-seccomp-deny-message.md`（由 design-plan subagent 同步产出）
 > **目标格式：**
 > ```
 > Sandbox denial (Seccomp): blocked syscall='mount' category='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS
@@ -188,7 +188,7 @@ mod tests {
 `tests/seccomp_test.rs`：
 
 - **删除** `fn blacklist_name(nr)` 镜像表（约 30 行）。
-- **新增** `fn syscall_name_for_test(nr_str)` 与 `fn category_for_test(nr_str)`（调 `sandbox_runtime::linux::seccomp::{syscall_name, syscall_by_name}`）。
+- **新增** `fn syscall_name_for_test(nr_str)` 与 `fn category_for_test(nr_str)`（调 `seabox::linux::seccomp::{syscall_name, syscall_by_name}`）。
 - **`assert_syscall_blocked` 增加断言**：
   - `out.stderr.contains(&format!("syscall='{name}'"))`
   - `out.stderr.contains(&format!("nr={nr}"))`
@@ -252,7 +252,7 @@ mod tests {
 
 **操作：**
 ```bash
-grep -rn "Blocked by seccomp filter (SIGSYS)" /home/zs/Develop/sandbox-runtime-rs/
+grep -rn "Blocked by seccomp filter (SIGSYS)" /home/zs/Develop/seabox/
 # 期望：除 README.md 历史 git 记录外，**无任何活代码/测试/示例**命中此字符串。
 ```
 
@@ -267,7 +267,7 @@ grep -rn "Blocked by seccomp filter (SIGSYS)" /home/zs/Develop/sandbox-runtime-r
 **操作（一气呵成）：**
 
 ```bash
-cd /home/zs/Develop/sandbox-runtime-rs
+cd /home/zs/Develop/seabox
 cargo build --release
 cargo clippy -- -D warnings
 cargo fmt --check
@@ -296,23 +296,23 @@ cargo build --bin syscall_probe
 **操作：**
 
 ```bash
-cd /home/zs/Develop/sandbox-runtime-rs
+cd /home/zs/Develop/seabox
 cargo build --release
 cargo build --bin syscall_probe
 
 # Case 1: mount (nr=165)
-./target/release/sandbox-runtime run --policy full-access -- \
+./target/release/seabox run --policy full-access -- \
     ./target/debug/syscall_probe 165 0 0 0 0 0 0
 # 期望 stderr: "Sandbox denial (Seccomp): blocked syscall='mount' category='mount' nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS"
 # 期望 exit: 126
 
 # Case 2: bpf (nr=357)
-./target/release/sandbox-runtime run --policy full-access -- \
+./target/release/seabox run --policy full-access -- \
     ./target/debug/syscall_probe 357 0 0 0
 # 期望: syscall='bpf' category='bpf' nr=357 arch=0xc000003e ...
 
 # Case 3: unshare (nr=97)
-./target/release/sandbox-runtime run --policy full-access -- \
+./target/release/seabox run --policy full-access -- \
     ./target/debug/syscall_probe 97 0
 # 期望: syscall='unshare' category='namespace' nr=97 arch=0xc000003e ...
 ```
@@ -334,7 +334,7 @@ cargo build --bin syscall_probe
 **操作：**
 
 ```bash
-cd /home/zs/Develop/sandbox-runtime-rs
+cd /home/zs/Develop/seabox
 git checkout -b feat/seccomp-deny-message
 git add -A
 git commit -m "feat(seccomp): 富诊断消息携带 syscall 名/号/架构/分类

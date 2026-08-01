@@ -136,7 +136,7 @@ pub unsafe fn do_mounts(ops: *const RawMountOp, count: usize) -> i32 {
         let ret = libc::mount(source, target, fstype, op.flags, data);
         if ret != 0 {
             // 写 stderr
-            let msg = b"[sandbox-runtime] mount #";
+            let msg = b"[seabox] mount #";
             libc::write(libc::STDERR_FILENO, msg.as_ptr() as *const _, msg.len());
             // 写失败序号（十进制，支持多位）
             let idx = (i + 1) as i32;

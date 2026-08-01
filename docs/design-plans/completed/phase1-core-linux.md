@@ -2,14 +2,14 @@
 
 ## 1. 架构概要
 
-Phase 1 实现 sandbox-runtime-rs 的核心骨架：一个**零外部二进制依赖**的 Linux 沙箱运行时，通过 Landlock + seccomp 在进程级别实施文件系统和系统调用限制。
+Phase 1 实现 seabox 的核心骨架：一个**零外部二进制依赖**的 Linux 沙箱运行时，通过 Landlock + seccomp 在进程级别实施文件系统和系统调用限制。
 
 系统分为四层：
 
 ```
 ┌───────────── API 层 ─────────────────┐
 │                                       │
-│  CLI (sandbox-runtime run <cmd>)      │
+│  CLI (seabox run <cmd>)      │
 │  Rust crate (pub trait Sandbox)       │
 │                                       │
 ├────────────── Core ───────────────────┤

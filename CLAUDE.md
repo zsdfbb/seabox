@@ -12,13 +12,13 @@
 
 ### 与 bubblewrap 的定位差异
 
-| 维度 | bubblewrap | sandbox-runtime |
+| 维度 | bubblewrap | seabox |
 |------|-----------|----------------|
 | 文件系统 | 手动 bind mount（`--ro-bind` / `--tmpfs`） | **Landlock ACL**（`--landlock /:ro`，声明式、零挂载） |
 | seccomp | 仅外部原始 BPF（`--seccomp FD`） | 外部 BPF + **`--seccomp-deny-nr` 精确拦截 + USER_NOTIF 诊断** |
 | 超时控制 | 无 | `--timeout` / `--timeout-max` |
 | 使用方式 | CLI only | CLI + **Crate API**（`SandboxConfig::with_*`） |
-| 能力检查 | 无 | `sandbox-runtime check` |
+| 能力检查 | 无 | `seabox check` |
 | 外部网络 | `--share-net`（二选一） | `--allow-network`（与 `--unshare-net` 正交组合） |
 | 特权降级 | `--cap-drop ALL` | **user ns 自动降级**（ns 内无特权） |
 
@@ -62,7 +62,7 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 ## 目录结构（实际状态）
 
 ```
-sandbox-runtime-rs/
+seabox/
 ├── Cargo.toml
 ├── README.md
 ├── LICENSE                     # MIT
@@ -203,17 +203,17 @@ cargo test -- --nocapture 2>&1 | grep skipping
 
 ### 测试安全
 
-**绝不要**用 shell 外层重定向（`> file`、`>> file`）把 sandbox-runtime 的 stdout/stderr 写入本仓库里的任何工程文件（README、CLAUDE.md、源码、配置等），否则会绕过沙箱直接修改项目文件。
+**绝不要**用 shell 外层重定向（`> file`、`>> file`）把 seabox 的 stdout/stderr 写入本仓库里的任何工程文件（README、CLAUDE.md、源码、配置等），否则会绕过沙箱直接修改项目文件。
 
 ```bash
 # ❌ 危险：直接覆盖工程文件
-./sandbox-runtime run -- sh -c "echo x" > README.md
+./seabox run -- sh -c "echo x" > README.md
 
 # ✅ 写到 /tmp 或 tempdir
-./sandbox-runtime run -- sh -c "echo x" > /tmp/test.out
+./seabox run -- sh -c "echo x" > /tmp/test.out
 
 # ✅ 用变量接住输出
-out=$(./sandbox-runtime run -- sh -c "echo x")
+out=$(./seabox run -- sh -c "echo x")
 echo "$out"
 ```
 

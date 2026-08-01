@@ -6,7 +6,7 @@
 
 ## 动机
 
-sandbox-runtime 目前有 Landlock (文件系统 ACL) 和 seccomp (13 黑名单 syscall) 两层防护。Landlock 限制文件访问，seccomp 阻止危险 syscall。但仍有不足：
+seabox 目前有 Landlock (文件系统 ACL) 和 seccomp (13 黑名单 syscall) 两层防护。Landlock 限制文件访问，seccomp 阻止危险 syscall。但仍有不足：
 
 - **进程可见性**: 子进程仍能看到宿主机上所有进程 (`/proc/[pid]`)，可能泄漏信息
 - **网络访问**: 没有网络隔离，所有命令默认可访问网络（未来 `--allow-network` 是显式放行）
@@ -23,7 +23,7 @@ User namespace 能解决这些限制：为进程创建独立的 UID/GID 映射�
 2. **user namespace 优先**: 写入 uid_map/gid_map 使容器内 root 能执行需特权的操作
 3. **回退语义**: `--unshare-user-try` 和 `--unshare-cgroup-try` 在能力不支持时不报错
 4. **与现有机制兼容**: namespace 层与 Landlock + seccomp 层正交，同时加固
-5. **check 命令可探测**: `sandbox-runtime check` 报告哪些 namespace 可用
+5. **check 命令可探测**: `seabox check` 报告哪些 namespace 可用
 
 ## Namespace 矩阵
 

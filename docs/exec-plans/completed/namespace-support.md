@@ -168,32 +168,32 @@ tasks:
       每个测试使用 `assert_cmd::Command` 调用二进制。
 
       1. test_unshare_uts_hostname:
-         - 命令: sandbox-runtime run --unshare-uts --hostname foo -- hostname
+         - 命令: seabox run --unshare-uts --hostname foo -- hostname
          - 验证: stdout == "foo\n"
          - 跳过条件: UTS namespace 不可用
 
       2. test_unshare_pid:
-         - 命令: sandbox-runtime run --unshare-pid -- sh -c "echo $$"
+         - 命令: seabox run --unshare-pid -- sh -c "echo $$"
          - 验证: stdout == "1\n"
          - 跳过条件: PID namespace 不可用
 
       3. test_unshare_net_no_network:
-         - 命令: sandbox-runtime run --unshare-net -- ping -c 1 8.8.8.8
+         - 命令: seabox run --unshare-net -- ping -c 1 8.8.8.8
          - 验证: 返回非零状态（网络不可达）
          - 跳过条件: NET namespace 不可用
 
       4. test_unshare_net_loopback:
-         - 命令: sandbox-runtime run --unshare-net -- ping -c 1 127.0.0.1
+         - 命令: seabox run --unshare-net -- ping -c 1 127.0.0.1
          - 验证: 返回 0（回环可用）
          - 跳过条件: NET namespace 不可用
 
       5. test_unshare_ipc:
-         - 命令: sandbox-runtime run --unshare-ipc -- ipcs -q
+         - 命令: seabox run --unshare-ipc -- ipcs -q
          - 验证: stdout 显示无消息队列 (或 ipcs 命令成功)
          - 跳过条件: IPC namespace 不可用
 
       6. test_unshare_uid_gid:
-         - 命令: sandbox-runtime run --unshare-user --uid 1000 --gid 1000 -- id -u
+         - 命令: seabox run --unshare-user --uid 1000 --gid 1000 -- id -u
          - 验证: stdout == "1000\n"
          - 跳过条件: USER namespace 不可用
 
@@ -201,26 +201,26 @@ tasks:
          - 与 6 类似，验证 id -g
 
       8. test_unshare_all:
-         - 命令: sandbox-runtime run --unshare-all -- hostname
+         - 命令: seabox run --unshare-all -- hostname
          - 验证: 执行成功（仅验证不 panic）
          - 跳过条件: 任意 namespace 不可用（user_try/cgroup_try 已处理回退）
 
       9. test_unshare_all_with_landlock:
-         - 命令: sandbox-runtime run --unshare-all --landlock '/:ro' -- cat /etc/passwd
+         - 命令: seabox run --unshare-all --landlock '/:ro' -- cat /etc/passwd
          - 验证: 执行成功（namespace + landlock 组合不冲突）
          - 跳过条件: Landlock 或 namespace 不可用
 
       10. test_chdir_before_exec:
-          - 命令: sandbox-runtime run --chdir /tmp -- pwd
+          - 命令: seabox run --chdir /tmp -- pwd
           - 验证: stdout == "/tmp\n"
 
       11. test_clearenv:
-          - 命令: sandbox-runtime run --clearenv -- env
+          - 命令: seabox run --clearenv -- env
           - 验证: stdout 为空（或只有少量的必需变量）
 
       12. test_hostname_isolated:
           - 命令: 先设置 hostname 在容器内，再在宿主机验证未改变
-          - shell: sandbox-runtime run --unshare-uts --hostname container -- hostname
+          - shell: seabox run --unshare-uts --hostname container -- hostname
           - 验: 宿主机 hostname 不变
           - 跳过条件: UTS namespace 不可用
 
@@ -230,7 +230,7 @@ tasks:
           - 注: 需要模拟环境，或用条件编译跳过
 
       14. test_pid_ns_init_process:
-          - 命令: sandbox-runtime run --unshare-pid -- sh -c "echo $$"
+          - 命令: seabox run --unshare-pid -- sh -c "echo $$"
           - 验证: stdout == "1\n"
           - 跳过条件: PID namespace 不可用
 

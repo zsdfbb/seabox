@@ -6,7 +6,7 @@
 - ✅ `CommandOutput { exit_code, blocked_syscall }` + `ExitReason` 四值枚举
 - ✅ Linux: Landlock ruleset 实现（ABI v1-v7，`ro`/`rw`/`rwx`/`all` 预设）
 - ✅ Linux: seccomp BPF USER_NOTIF，13 个黑名单 syscall，EPERM 响应，富诊断消息
-- ✅ CLI: `sandbox-runtime run [--landlock path:perm...]` + `check`
+- ✅ CLI: `seabox run [--landlock path:perm...]` + `check`
 - ✅ 87 项集成测试（Landlock ACL + 13 个 syscall 逐项 + 拒绝检测 + 配置解析）
 
 **验证状态**：`cargo test` 全通过，`cargo clippy -- -D warnings` 零警告，`cargo fmt` 合规。

@@ -1,6 +1,6 @@
-//! sandbox-runtime 二进制的 seccomp 黑名单端到端测试。
+//! seabox 二进制的 seccomp 黑名单端到端测试。
 //!
-//! 直接以子进程方式运行编译出的 `sandbox-runtime` 二进制，触发黑名单中
+//! 直接以子进程方式运行编译出的 `seabox` 二进制，触发黑名单中
 //! 的 13 个 syscall，断言 wrapper 对 SIGSYS 杀死的归类与拒绝消息格式。
 //!
 //! ## 覆盖范围
@@ -53,8 +53,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use sandbox_runtime::linux::seccomp;
-use sandbox_runtime::linux::seccomp::is_available as seccomp_is_available;
+use seabox::linux::seccomp;
+use seabox::linux::seccomp::is_available as seccomp_is_available;
 
 /// 通过 syscall 号查名。
 #[allow(dead_code)]
@@ -69,7 +69,7 @@ fn syscall_name_for_test(nr: &str) -> &'static str {
 
 /// 由 Cargo 在集成测试中自动注入的二进制绝对路径。
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_sandbox-runtime")
+    env!("CARGO_BIN_EXE_seabox")
 }
 
 /// `syscall_probe` 辅助二进制的绝对路径，用于直接调用任意 syscall。
@@ -96,14 +96,14 @@ struct RunOutput {
     stderr: String,
 }
 
-/// 以子进程方式调用 `sandbox-runtime`，捕获退出码与双向输出。
+/// 以子进程方式调用 `seabox`，捕获退出码与双向输出。
 fn run_cli(args: &[&str]) -> RunOutput {
     let output = Command::new(bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to spawn sandbox-runtime binary");
+        .expect("failed to spawn seabox binary");
 
     RunOutput {
         exit_code: output.status.code(),
@@ -115,7 +115,7 @@ fn run_cli(args: &[&str]) -> RunOutput {
 /// 生成进程唯一的 mount 目标路径，避免与并发/历史运行残留冲突。
 fn unique_mount_target(tag: &str) -> PathBuf {
     let pid = std::process::id();
-    PathBuf::from(format!("/tmp/.sandbox_runtime_seccomp_{tag}_{pid}"))
+    PathBuf::from(format!("/tmp/.seabox_seccomp_{tag}_{pid}"))
 }
 
 /// Best-effort 清理某个 mount 目标：若已挂载则 umount，若为目录则删除。
@@ -301,7 +301,7 @@ fn bpf_nr() -> &'static str {
 // 通用断言 helper
 // ---------------------------------------------------------------------------
 
-/// 调用 sandbox-runtime 包装 syscall_probe 来触发指定 syscall，断言
+/// 调用 seabox 包装 syscall_probe 来触发指定 syscall，断言
 /// wrapper 把它归类为 `Denied { Seccomp }` 并退出 126。
 fn assert_syscall_blocked(nr: &str, extra_args: &[&str]) {
     let mut args: Vec<&str> = vec!["run", "--", syscall_probe_bin(), nr];

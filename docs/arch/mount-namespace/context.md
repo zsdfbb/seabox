@@ -2,9 +2,9 @@
 
 ## 概述
 
-分析 sandbox-runtime 引入 mount namespace（`CLONE_NEWNS`）和文件系统重排能力的必要性、方案、与现有 Landlock 机制的配合关系。
+分析 seabox 引入 mount namespace（`CLONE_NEWNS`）和文件系统重排能力的必要性、方案、与现有 Landlock 机制的配合关系。
 
-核心问题：**Landlock 提供声明式权限控制（能读/写哪些路径），mount ns 提供文件系统视图控制（能看到什么路径）。两者正交。sandbox-runtime 当前只有前者，是否应该补上后者？**
+核心问题：**Landlock 提供声明式权限控制（能读/写哪些路径），mount ns 提供文件系统视图控制（能看到什么路径）。两者正交。seabox 当前只有前者，是否应该补上后者？**
 
 ---
 
@@ -67,10 +67,10 @@ bwrap --ro-bind /usr/lib/x86_64-linux-gnu /usr/lib \
 
 bwrap 2015 年诞生时 **Landlock 还不存在**（5.13, 2021）。mount ns + bind mount 是当时做文件系统隔离的标准做法。它不是"选择"mount ns 而非 Landlock，而是 Landlock 当时不可选。
 
-而 sandbox-runtime 选择 Landlock 不是因为 Landlock 更好，而是因为当前场景（Agent 在宿主机上跑，需要访问宿主机文件）是**权限隔离**问题，Landlock 更轻量、更声明式。
+而 seabox 选择 Landlock 不是因为 Landlock 更好，而是因为当前场景（Agent 在宿主机上跑，需要访问宿主机文件）是**权限隔离**问题，Landlock 更轻量、更声明式。
 
 ```
-bwrap 的问题                sandbox-runtime 的问题
+bwrap 的问题                seabox 的问题
 ─────────────────           ─────────────────
 给 GIMP 一个 runtime        给 Claude Code 一个 shell
 GIMP 不该看到宿主机          Agent 需要看到宿主机（项目文件、git、工具链）
@@ -78,7 +78,7 @@ Flatpak app 不知道宿主机     Agent 知道自己在宿主机上
 视图从零构建                 权限在现有文件系统上叠加
 ```
 
-如果 sandbox-runtime 的场景扩展到**视图隔离**（多 Agent 工具层、CodeWhale 云部署），mount ns 就会变成必需的——跟 bwrap 一样。
+如果 seabox 的场景扩展到**视图隔离**（多 Agent 工具层、CodeWhale 云部署），mount ns 就会变成必需的——跟 bwrap 一样。
 
 ---
 
@@ -93,7 +93,7 @@ $ node --version
 v20.0.0
 
 # 想做的事：给 Agent 一个"假 /usr"其中 node 是 18 版
-sandbox-runtime run --unshare-mount \
+seabox run --unshare-mount \
   --bind /opt/node18/bin/node /usr/bin/node \
   -- node --version
 → v18.0.0
@@ -107,7 +107,7 @@ sandbox-runtime run --unshare-mount \
 
 ```
 # 所有全局安装写入 tmpfs，退出自动消失
-sandbox-runtime run --unshare-mount \
+seabox run --unshare-mount \
   --tmpfs /usr/local \
   -- npm install -g typescript && tsc --version
 ```
@@ -121,7 +121,7 @@ sandbox-runtime run --unshare-mount \
 ```
 # 预构建一个 agent-tools 目录，里面装了 git / node / cargo / python / ...
 # 作为只读 base 挂载到 /usr，宿主机 /usr 完全隐藏
-sandbox-runtime run --unshare-mount \
+seabox run --unshare-mount \
   --ro-bind /images/agent-tools /usr \
   --tmpfs /tmp \
   -- cargo build
@@ -135,9 +135,9 @@ sandbox-runtime run --unshare-mount \
 
 ```
 # Agent A 的 /tmp 只有 A 能看见
-sandbox-runtime run --unshare-mount --tmpfs /tmp -- ./build.sh
+seabox run --unshare-mount --tmpfs /tmp -- ./build.sh
 # Agent B 的 /tmp 只有 B 能看见
-sandbox-runtime run --unshare-mount --tmpfs /tmp -- ./test.sh
+seabox run --unshare-mount --tmpfs /tmp -- ./test.sh
 ```
 
 **Landlock 部分覆盖**：`--landlock /tmp:rw` 能隔离写权限（A 不能写 B 的文件），但不能阻止 A 读 B 的文件（`--landlock /tmp:ro` 也允许读）。
@@ -148,7 +148,7 @@ sandbox-runtime run --unshare-mount --tmpfs /tmp -- ./test.sh
 
 ```
 # mount ns 可以完全隐藏宿主机的敏感目录
-sandbox-runtime run --unshare-mount \
+seabox run --unshare-mount \
   --tmpfs /etc \
   --tmpfs /var \
   --ro-bind /project /project \
@@ -209,7 +209,7 @@ mount ns:  宿主机 /usr → 镜像 /usr     (视图)
 
 ```
 # 视图：只有 project 和 tmpfs（隐藏了宿主机 /etc、/var、/home）
-sandbox-runtime run --unshare-mount \
+seabox run --unshare-mount \
   --ro-bind /project /project \
   --tmpfs /tmp --tmpfs /etc --tmpfs /var \
   --landlock /project:rw --landlock /tmp:rw \

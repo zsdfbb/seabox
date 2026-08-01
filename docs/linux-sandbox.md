@@ -1,6 +1,6 @@
 # Linux 沙箱机制
 
-最低支持内核：Linux 5.13（Landlock ABI v1）。低于 5.13 时 `sandbox-runtime check` 报告 Landlock 不可用。
+最低支持内核：Linux 5.13（Landlock ABI v1）。低于 5.13 时 `seabox check` 报告 Landlock 不可用。
 
 所有机制均通过 Rust 直接调用内核 syscall，**零外部二进制依赖**。
 
@@ -40,13 +40,13 @@ seccomp 策略完全由用户驱动，不设默认黑名单。
 
 ```
 # USER_NOTIF 拦截指定 syscall（精确诊断）
-sandbox-runtime run --seccomp-deny-nr 165 -- ls
+seabox run --seccomp-deny-nr 165 -- ls
 
 # 外部 cBPF 堆叠（prctl 直装，无诊断）
-sandbox-runtime run --seccomp-filter-fd 3 -- ls 3< block.bpf
+seabox run --seccomp-filter-fd 3 -- ls 3< block.bpf
 
 # 混合：内部 deny 兜底 + 外部 BPF 收紧
-sandbox-runtime run --seccomp-deny-nr 165 --seccomp-filter-fd 3 -- ls 3< extra.bpf
+seabox run --seccomp-deny-nr 165 --seccomp-filter-fd 3 -- ls 3< extra.bpf
 
 # 不传 seccomp 参数 → 不装任何 filter
 ```

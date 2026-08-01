@@ -2,7 +2,7 @@
 
 ## 概述
 
-分析 sandbox-runtime-rs 中子进程创建的 async-signal-safety 问题，以及是否应重构为 `clone()` 创建进程。
+分析 seabox 中子进程创建的 async-signal-safety 问题，以及是否应重构为 `clone()` 创建进程。
 
 ## 现有架构
 
@@ -54,7 +54,7 @@ child 中涉及堆操作的地方：`clearenv`（free）、`setenv`（malloc/rea
 ### 场景一：仅 CLI 使用（如 bwrap）
 
 ```
-agent 框架 → exec("sandbox-runtime run ...") → 全新进程 → fork → child
+agent 框架 → exec("seabox run ...") → 全新进程 → fork → child
 ```
 
 全新进程，单线程，无锁继承问题，child 里调 setenv/execvp 都安全。
@@ -124,7 +124,7 @@ Crate 的好处：
 
 ## bubblewrap 的参考价值
 
-| 维度 | bubblewrap | sandbox-runtime |
+| 维度 | bubblewrap | seabox |
 |------|------------|-----------------|
 | 形态 | 纯 CLI | CLI + crate |
 | 多线程约束 | 无（每次新进程） | 有（同进程引用） |

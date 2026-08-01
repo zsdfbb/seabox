@@ -99,7 +99,7 @@ cargo run -- run --unshare-net -- ip link show lo
 #### 场景 3：外部 BPF 测试
 
 ```
-# 准备 ALLOW-all BPF 字节 → fd → sandbox-runtime --seccomp-filter-fd <fd>
+# 准备 ALLOW-all BPF 字节 → fd → seabox --seccomp-filter-fd <fd>
 → /bin/true 正常退出 0
 ```
 

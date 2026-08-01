@@ -6,7 +6,7 @@
 //! 等价于 CLI:
 //!
 //! ```bash
-//! sandbox-runtime run \
+//! seabox run \
 //!   --landlock '/:ro' --landlock '/tmp:rw' \
 //!   -- sh -c 'echo hello; id'
 //! ```
@@ -14,8 +14,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
+use seabox::config::SandboxConfig;
+use seabox::{CommandSpec, ExitReason, Sandbox};
 
 fn main() -> anyhow::Result<()> {
     // ── 1. 构建配置 ──────────────────────────────────

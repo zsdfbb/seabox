@@ -2,7 +2,7 @@
 
 ## 概述
 
-本文件分析 sandbox-runtime 是否需要 eBPF 网络过滤（Phase 2b），以及在当前架构中的定位。
+本文件分析 seabox 是否需要 eBPF 网络过滤（Phase 2b），以及在当前架构中的定位。
 
 核心问题：**在 netns（二进制阻断）+ Landlock ABI 5（TCP bind/connect）+ seccomp（syscall 拦截）已经覆盖主要隔离场景的前提下，是否有必要引入 aya + cgroup_sock_addr eBPF 来实现 IP 级访问控制？**
 
@@ -71,7 +71,7 @@ Landlock ABI 5 已引入 `LANDLOCK_ACCESS_NET_BIND_TCP` 和 `LANDLOCK_ACCESS_NET
 
 ### 与 seccomp 的 bpf 系统调用冲突
 
-当前 `seccomp.rs` 的黑名单中 **包含 `bpf(2)` 系统调用**（x86_64 nr 357），这意味着沙箱子进程**自身**不能加载 eBPF 程序。这是正确的——eBPF 程序应由**父进程（sandbox-runtime 主进程）**在 fork 之前加载并 attach 到 cgroup，然后子进程加入 cgroup 自动受限制。如果未来 Phase 2b 实现，需要：
+当前 `seccomp.rs` 的黑名单中 **包含 `bpf(2)` 系统调用**（x86_64 nr 357），这意味着沙箱子进程**自身**不能加载 eBPF 程序。这是正确的——eBPF 程序应由**父进程（seabox 主进程）**在 fork 之前加载并 attach 到 cgroup，然后子进程加入 cgroup 自动受限制。如果未来 Phase 2b 实现，需要：
 
 1. 父进程使用 `aya` 加载 eBPF 程序到合适的位置（cgroup 层级）
 2. 子进程通过 `pre_exec` 序列加入该 cgroup
@@ -135,20 +135,20 @@ Phase 2b 的 eBPF 方案基于两个前提：
 
 ```
 # 完全隔离
-sandbox-runtime run --unshare-net -- ./dangerous_script.sh
+seabox run --unshare-net -- ./dangerous_script.sh
 
 # 允许本地通信
-sandbox-runtime run --unshare-net --allow-network -- ./test_with_localhost.sh
+seabox run --unshare-net --allow-network -- ./test_with_localhost.sh
 
 # 允许完整外部网络
-sandbox-runtime run -- curl https://crates.io
+seabox run -- curl https://crates.io
 ```
 
 #### 场景 2（未来，Phase 4）：云容器中限制仅能访问指定 API
 
 ```
 # 假设 Phase 2b 已实现
-sandbox-runtime run \
+seabox run \
   --allow-network \
   --allow-connect api.github.com:443 \
   --allow-connect crates.io:443 \

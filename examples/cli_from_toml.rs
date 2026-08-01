@@ -4,7 +4,7 @@
 //!
 //! 演示如何定义 TOML 格式的配置结构，解析后创建沙箱并执行命令。
 //!
-//! 注意：sandbox-runtime 本身不提供 serde 序列化支持，
+//! 注意：seabox 本身不提供 serde 序列化支持，
 //! 但你可以像本示例一样自己定义可序列化的配置层。
 
 use std::path::PathBuf;
@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{CommandSpec, ExitReason, Sandbox};
+use seabox::config::SandboxConfig;
+use seabox::{CommandSpec, ExitReason, Sandbox};
 
 // ───────────────────────────────────────────────────────────
 // 1. 定义 TOML 可解析的配置结构

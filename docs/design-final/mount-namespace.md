@@ -25,7 +25,7 @@ fork() → unshare(CLONE_NEWNS)
 - ro-bind 分两步：先 bind，再 `MS_REMOUNT|MS_BIND|MS_RDONLY|MS_REC`
 - `--proc /proc`、`--dev /dev` 通过 `mount -t proc` / `mount -t devtmpfs` 实现
 
-### sandbox-runtime 的约束
+### seabox 的约束
 
 - 子进程零堆操作（ADR 0003）→ 所有 mount 参数需在 fork 前预计算为 raw pointer
 - `mount(2)` 是纯 syscall，在子进程中调用无堆分配问题 → 安全
@@ -90,19 +90,19 @@ PPM（Pre-Parsed Mount）在 mount 数 < 20 时最优。典型场景（3-10 moun
 
 ```
 # mount ns 隔离（无额外 mount）
-sandbox-runtime run --unshare-mnt -- ./script.sh
+seabox run --unshare-mnt -- ./script.sh
 
 # 隐式 mount ns（mount 操作自动启用）
-sandbox-runtime run --bind /opt/node18/usr /usr -- node --version
+seabox run --bind /opt/node18/usr /usr -- node --version
 
 # 只读 bind + tmpfs
-sandbox-runtime run \
+seabox run \
   --ro-bind /images/tools /usr \
   --tmpfs /tmp \
   -- cargo build
 
 # 组合 Landlock（权限）+ mount ns（视图）
-sandbox-runtime run \
+seabox run \
   --unshare-mnt \
   --tmpfs /tmp --tmpfs /var --tmpfs /etc \
   --landlock /project:rw \

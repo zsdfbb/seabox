@@ -1,4 +1,4 @@
-//! sandbox-runtime 的核心类型与 trait。
+//! seabox 的核心类型与 trait。
 //!
 //! 本模块定义平台无关的抽象：
 //! - [`SandboxImpl`] trait（沙箱后端的主要抽象，非 pub）
@@ -168,7 +168,7 @@ fn create_sandbox_impl(config: config::SandboxConfig) -> anyhow::Result<Box<dyn 
     {
         let _ = config;
         anyhow::bail!(
-            "sandbox-runtime requires Linux; \
+            "seabox requires Linux; \
              the current platform is not supported"
         );
     }
@@ -263,7 +263,7 @@ pub fn check_capabilities() -> String {
 /// 可通过 `with_*` 链式方法配置：
 ///
 /// ```
-/// use sandbox_runtime::CommandSpec;
+/// use seabox::CommandSpec;
 ///
 /// let spec = CommandSpec::default()
 ///     .with_program("sh")

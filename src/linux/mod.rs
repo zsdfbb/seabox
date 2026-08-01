@@ -251,7 +251,7 @@ impl SandboxImpl for LinuxSandbox {
             return Err(std::io::Error::last_os_error()).with_context(|| {
                 format!(
                     "fork() failed for '{}'. \
-                         Note: sandbox-runtime does NOT interpret shell metacharacters \
+                         Note: seabox does NOT interpret shell metacharacters \
                          (>, >>, |, *, &&, etc.) — it runs the program directly via execve. \
                          To use shell syntax, invoke 'sh -c' explicitly, e.g. \
                          `-- sh -c \"your shell command here\"`. \

@@ -18,7 +18,7 @@ bwrap --ro-bind /usr /usr --bind /tmp /tmp --proc /proc --dev /dev -- <command>
 
 每条路径规则单独声明，权限是隐含的（ro-bind = 只读，bind = 读写）。
 
-**Anthropic `@anthropic-ai/sandbox-runtime`**：Node.js 库，提供高层 `FsPolicy` 枚举（`ReadOnly` / `WorkspaceWrite` / `FullAccess`），兼有 `allow_write: string[]` 数组。
+**Anthropic `@anthropic-ai/seabox`**：Node.js 库，提供高层 `FsPolicy` 枚举（`ReadOnly` / `WorkspaceWrite` / `FullAccess`），兼有 `allow_write: string[]` 数组。
 
 本项目同时面向两种用户：
 
@@ -93,7 +93,7 @@ bwrap 的每条规则用独立 flag（`--ro-bind`、`--bind`）是有道理的�
 
 ## 替代方案
 
-### A：高层策略枚举（如 Anthropic `@anthropic-ai/sandbox-runtime`）
+### A：高层策略枚举（如 Anthropic `@anthropic-ai/seabox`）
 
 - `FsPolicy { FullAccess, ReadOnly, WorkspaceWrite }` + `allow_write: Vec<String>`
 - 简单，CLI 友好

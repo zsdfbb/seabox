@@ -4,11 +4,11 @@
 //! stderr 中的 Landlock 拒绝模式、seccomp 拒绝模式以及普通程序退出。
 
 // 本文件仅在 Linux 下编译，因为它依赖
-// `sandbox_runtime::linux::LinuxSandbox`。
+// `seabox::linux::LinuxSandbox`。
 #![cfg(target_os = "linux")]
 
-use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{DenyMechanism, ExitReason, Sandbox};
+use seabox::config::SandboxConfig;
+use seabox::{DenyMechanism, ExitReason, Sandbox};
 
 /// 辅助函数：创建一个默认配置的 Sandbox 用于 classify_exit 测试。
 fn make_sandbox() -> Sandbox {

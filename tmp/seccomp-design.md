@@ -9,13 +9,13 @@
 
 ```
 # syscall 号拦截（USER_NOTIF，精确诊断）
-sandbox-runtime run --seccomp-deny-nr 165 -- ls
+seabox run --seccomp-deny-nr 165 -- ls
 
 # 外部 cBPF 堆叠（prctl 直装，无诊断）
-sandbox-runtime run --seccomp-filter-fd 3 -- ls 3< block.bpf
+seabox run --seccomp-filter-fd 3 -- ls 3< block.bpf
 
 # 混合：内部 deny 兜底 + 外部 BPF 收紧
-sandbox-runtime run \
+seabox run \
   --seccomp-deny-nr 165 \
   --seccomp-filter-fd 3 \
   -- ls 3< extra.bpf

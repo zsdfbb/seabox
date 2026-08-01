@@ -184,7 +184,7 @@ pub unsafe fn setup_loopback() -> bool {
 ```rust
 // 仅失败时输出
 let _ = libc::write(libc::STDERR_FILENO,
-    b"[sandbox-runtime] warning: failed to set up loopback\n");
+    b"[seabox] warning: failed to set up loopback\n");
 ```
 
 项目风格已用 `_exit(1)` 报错，`write(STDERR_FILENO)` 是 async-signal-safe 的。

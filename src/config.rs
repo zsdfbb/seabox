@@ -314,7 +314,7 @@ pub struct NamespacesConfig {
 /// # 示例
 ///
 /// ```
-/// use sandbox_runtime::config::expand_tilde;
+/// use seabox::config::expand_tilde;
 ///
 /// let expanded = expand_tilde("~/projects");
 /// assert!(!expanded.starts_with("~/"));

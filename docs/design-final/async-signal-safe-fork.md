@@ -2,7 +2,7 @@
 
 ## 问题
 
-`sandbox-runtime-rs` 作为 crate 可能被多线程的 agent 框架引用。其他线程在 `fork()` 时可能持有 malloc 锁，子进程若碰堆就会死锁。
+`seabox` 作为 crate 可能被多线程的 agent 框架引用。其他线程在 `fork()` 时可能持有 malloc 锁，子进程若碰堆就会死锁。
 
 **关键约束**：子进程从 fork 到 execve 之间必须零堆操作，只调纯 syscall。
 

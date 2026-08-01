@@ -1,4 +1,4 @@
-//! 演示如何将 sandbox-runtime 作为 crate 使用（而非 CLI）。
+//! 演示如何将 seabox 作为 crate 使用（而非 CLI）。
 //!
 //! 通过 `SandboxConfig` 配置沙箱，调用 `Sandbox::from_config()` 创建实例，
 //! 然后用 `execute()` 执行命令并检查结果。沙箱配置用 `SandboxConfig::with_*`，
@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::{CommandSpec, Sandbox};
+use seabox::config::SandboxConfig;
+use seabox::{CommandSpec, Sandbox};
 
 fn main() -> anyhow::Result<()> {
     // ── 构建配置（等价于 CLI: --unshare-all --uid 1000

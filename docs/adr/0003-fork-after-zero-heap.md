@@ -4,7 +4,7 @@
 
 ## 背景
 
-sandbox-runtime-rs 同时提供 CLI 和 crate API。作为 crate 可能被多线程 agent 框架引用。
+seabox 同时提供 CLI 和 crate API。作为 crate 可能被多线程 agent 框架引用。
 
 `fork()` 后子进程中若调用了任何涉及堆操作（malloc/free/realloc）的函数，而 fork 时其他线程正持有 malloc 内部锁，则子进程会死锁。
 

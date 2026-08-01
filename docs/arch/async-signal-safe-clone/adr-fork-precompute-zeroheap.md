@@ -2,7 +2,7 @@
 
 **状态**：已采纳（2026-07-26）
 
-**背景**：sandbox-runtime-rs 同时提供 CLI 和 crate API。作为 crate 可能被多线程 agent 框架引用，其他线程在 fork() 时可能持内部锁，子进程若碰堆则死锁。
+**背景**：seabox 同时提供 CLI 和 crate API。作为 crate 可能被多线程 agent 框架引用，其他线程在 fork() 时可能持内部锁，子进程若碰堆则死锁。
 
 **决策**：fork 前预计算 argv/envp/cwd/exec_path，child 只调纯 syscall，零堆操作。
 

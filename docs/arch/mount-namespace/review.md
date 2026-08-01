@@ -150,7 +150,7 @@ child_setup.rs (enter_child)            ← 已有模块，无循环依赖
 
 ```
 # 场景：用户想"尽量"隐藏 /tmp，但不强制
-sandbox-runtime run --try-mount --tmpfs /tmp -- ./script.sh
+seabox run --try-mount --tmpfs /tmp -- ./script.sh
 ```
 
 但当前设计明确不做 optional mount（D6）。这个取舍合理——保持简单，用户可以通过外部脚本自己降级。**但至少应该确保 `MS_PRIVATE|MS_REC` 的失败有降级（`MS_SLAVE`），因为这不是用户配的，是设计隐含的。**

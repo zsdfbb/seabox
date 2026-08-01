@@ -5,7 +5,7 @@
 ```
 ┌───────────── API 层 ─────────────┐
 │                                   │
-│  CLI (sandbox-runtime <cmd>)      │
+│  CLI (seabox <cmd>)      │
 │  Rust crate (pub trait Sandbox)   │
 │  HTTP API (POST /v1/sandbox/run)  │
 │                                   │

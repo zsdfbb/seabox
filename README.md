@@ -1,4 +1,4 @@
-# sandbox-runtime-rs
+# seabox
 
 一个轻量的 Rust 沙箱工具，**无需容器**即可在操作系统层面为任意进程强制施加文件系统与 syscall 限制。Linux 上使用 Landlock + seccomp，macOS 上使用 Seatbelt（计划中）。
 
@@ -29,41 +29,41 @@ Agent 类编程工具（Claude Code、CodeWhale、Cursor……）会代表用户
 
 ```bash
 # Linux x86_64 静态二进制（musl）
-curl -L https://github.com/zsdfbb/sandbox-runtime-rs/releases/latest/download/sandbox-runtime-x86_64-linux-musl.tar.gz | tar xz
-sudo mv sandbox-runtime /usr/local/bin/
+curl -L https://github.com/zsdfbb/seabox/releases/latest/download/seabox-x86_64-linux-musl.tar.gz | tar xz
+sudo mv seabox /usr/local/bin/
 ```
 
 ### 从源码编译
 
 ```bash
-git clone https://github.com/zsdfbb/sandbox-runtime-rs
-cd sandbox-runtime-rs
+git clone https://github.com/zsdfbb/seabox
+cd seabox
 cargo build --release
-./target/release/sandbox-runtime --help
+./target/release/seabox --help
 ```
 
 ### 作为库依赖
 
 ```toml
 [dependencies]
-sandbox-runtime = "0.1"
+seabox = "0.1"
 ```
 
 ## 快速开始
 
 ```bash
 # 1. 检查当前系统沙箱能力
-sandbox-runtime check
+seabox check
 # Capability                    Status
 # ----------------------------- --------------------
 # Landlock                      available (ABI v7)
 # Seccomp                       available
 
 # 2. 在只读沙箱里跑一个命令
-sandbox-runtime run --landlock '/:ro' -- cat /etc/passwd
+seabox run --landlock '/:ro' -- cat /etc/passwd
 
 # 3. 工作区模式（/tmp 可写）
-sandbox-runtime run --landlock '/:ro' --landlock '/tmp:rw' -- sh -c 'echo data > /tmp/out.txt'
+seabox run --landlock '/:ro' --landlock '/tmp:rw' -- sh -c 'echo data > /tmp/out.txt'
 
 # 4. 检查内核版本
 uname -r   # 需要 5.13+ 才能完整使用 Landlock
@@ -74,9 +74,9 @@ uname -r   # 需要 5.13+ 才能完整使用 Landlock
 ### 子命令
 
 ```
-sandbox-runtime run [OPTIONS] <COMMAND>...
-sandbox-runtime check
-sandbox-runtime serve [--port 7878]
+seabox run [OPTIONS] <COMMAND>...
+seabox check
+seabox serve [--port 7878]
 ```
 
 | 子命令 | 说明 |
@@ -110,31 +110,31 @@ sandbox-runtime serve [--port 7878]
 
 ```bash
 # 只读模式（cat 可以，写全部拒绝）
-sandbox-runtime run --landlock '/:ro' -- cat /etc/passwd
+seabox run --landlock '/:ro' -- cat /etc/passwd
 
 # 工作区模式（/tmp 可写，其余写拒绝）
-sandbox-runtime run --landlock '/:ro' --landlock '/tmp:rw' -- cargo build
+seabox run --landlock '/:ro' --landlock '/tmp:rw' -- cargo build
 
 # 完全绕过沙箱（不指定 landlock）
-sandbox-runtime run -- ls -la
+seabox run -- ls -la
 
 # 使用 -- 分隔符避免 clap 解析冲突
-sandbox-runtime run -- cargo build --release
+seabox run -- cargo build --release
 ```
 
 ### ⚠️ 沙箱不会解释 shell 元字符
 
-sandbox-runtime 通过 `execve` **直接执行单个程序**，不经过 shell。`>`、`>>`、`|`、`*`、`&&` 等 shell 元字符会被当作普通字符传给 `execve`。
+seabox 通过 `execve` **直接执行单个程序**，不经过 shell。`>`、`>>`、`|`、`*`、`&&` 等 shell 元字符会被当作普通字符传给 `execve`。
 
 ```bash
 # ❌ 这样会失败：spawn 找不到叫 "echo 'hello' >> README.md" 的程序
-sandbox-runtime run -- "echo 'hello' >> README.md"
+seabox run -- "echo 'hello' >> README.md"
 
 # ✅ 这样才对：把整条 shell 命令作为 -c 的参数
-sandbox-runtime run -- sh -c "echo 'hello' >> /tmp/test.out"
+seabox run -- sh -c "echo 'hello' >> /tmp/test.out"
 ```
 
-sandbox-runtime 在 spawn 失败时会主动提示这条修改建议。
+seabox 在 spawn 失败时会主动提示这条修改建议。
 
 ## Crate API 使用
 
@@ -143,9 +143,9 @@ sandbox-runtime 在 spawn 失败时会主动提示这条修改建议。
 ### Builder 构造配置
 
 ```rust
-use sandbox_runtime::config::SandboxConfig;
-use sandbox_runtime::linux::LinuxSandbox;
-use sandbox_runtime::{CommandSpec, LandlockPerm, LandlockRule, Sandbox};
+use seabox::config::SandboxConfig;
+use seabox::linux::LinuxSandbox;
+use seabox::{CommandSpec, LandlockPerm, LandlockRule, Sandbox};
 use std::time::Duration;
 
 let config = SandboxConfig::builder()

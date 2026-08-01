@@ -9,26 +9,26 @@
 
 use std::process::{Command, Output, Stdio};
 
-use sandbox_runtime::linux::namespaces;
+use seabox::linux::namespaces;
 
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
 
-/// 获取 sandbox-runtime 二进制路径。
+/// 获取 seabox 二进制路径。
 fn bin() -> String {
-    let bin = env!("CARGO_BIN_EXE_sandbox-runtime");
+    let bin = env!("CARGO_BIN_EXE_seabox");
     bin.to_owned()
 }
 
-/// 运行 sandbox-runtime CLI 并返回完整的 Output。
+/// 运行 seabox CLI 并返回完整的 Output。
 fn run_cli(args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to spawn sandbox-runtime binary")
+        .expect("failed to spawn seabox binary")
 }
 
 /// 测试输出封装。
@@ -207,7 +207,7 @@ fn allow_network_and_share_net_are_equivalent() {
 
 #[test]
 fn share_net_bwrap_compat() {
-    // bwrap --share-net 只是不隔离 netns，这里检查 sandbox-runtime
+    // bwrap --share-net 只是不隔离 netns，这里检查 seabox
     // 的 --share-net 是否也不隔离（可以用 --unshare-net 覆盖验证）
     let out: RunOutput = run_cli(&["run", "--share-net", "--", "true"]).into();
 

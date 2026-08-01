@@ -12,7 +12,7 @@
 
 ### 1.1 当前行为
 
-仓库 `sandbox-runtime-rs` 当前 seccomp 拒绝消息是**固定字符串**，不携带 syscall 名、号、架构、分类：
+仓库 `seabox` 当前 seccomp 拒绝消息是**固定字符串**，不携带 syscall 名、号、架构、分类：
 
 ```
 Sandbox denial (Seccomp): Blocked by seccomp filter (SIGSYS)
@@ -637,7 +637,7 @@ subprogram (probe)
     ├─ write "BLOCKED-SYSCALL:165:c000003e\n"   ← SIGSYS handler 直接 write(2) 到 stderr
     └─ _exit(159)
                                           ↓ fork+exec 的 stderr pipe
-父进程（sandbox-runtime）
+父进程（seabox）
     │
     └─ collect stderr
         │
@@ -717,7 +717,7 @@ subprogram (probe)
 
 | ID | 命令 | 期望输出 | 优先级 |
 |---|---|---|---|
-| M-1 | `./sandbox-runtime run --policy full-access -- ./syscall_probe 165 0 0 0 0 0 0` | exit 126；stderr 以 `Sandbox denial (Seccomp): blocked syscall='mount' category='mount' nr=165 arch=0xc000003e ...` 结尾 | ★★ |
+| M-1 | `./seabox run --policy full-access -- ./syscall_probe 165 0 0 0 0 0 0` | exit 126；stderr 以 `Sandbox denial (Seccomp): blocked syscall='mount' category='mount' nr=165 arch=0xc000003e ...` 结尾 | ★★ |
 | M-2 | 同 M-1 但 syscall=357 (bpf) | exit 126；stderr 含 `syscall='bpf' category='bpf'` | ★★ |
 | M-3 | 同 M-1 但 syscall=97 (unshare) | exit 126；stderr 含 `syscall='unshare' category='namespace'` | ★★ |
 | M-4 | 同 M-1 但用 read-only 策略 + probe=17 (read) | 不被 seccomp 拦；read 系统调用正常执行；无 `Sandbox denial` 字样 | ★ |
@@ -782,7 +782,7 @@ cargo build --release
 cargo build --bin syscall_probe
 
 # 测试 1: mount
-./target/release/sandbox-runtime run --policy full-access -- \
+./target/release/seabox run --policy full-access -- \
     ./target/debug/syscall_probe 165 0 0 0 0 0 0
 # 期望:
 #   - exit code = 126
@@ -791,17 +791,17 @@ cargo build --bin syscall_probe
 #      nr=165 arch=0xc000003e reason=blacklist signal=SIGSYS"
 
 # 测试 2: bpf
-./target/release/sandbox-runtime run --policy full-access -- \
+./target/release/seabox run --policy full-access -- \
     ./target/debug/syscall_probe 357 0 0 0
 # 期望: 含 "syscall='bpf' category='bpf' nr=357 arch=0xc000003e ..."
 
 # 测试 3: unshare
-./target/release/sandbox-runtime run --policy full-access -- \
+./target/release/seabox run --policy full-access -- \
     ./target/debug/syscall_probe 97 0
 # 期望: 含 "syscall='unshare' category='namespace' nr=97 arch=0xc000003e ..."
 
 # 测试 4: fallback 路径（强制 marker 缺失）
-./target/release/sandbox-runtime run --policy read-only -- \
+./target/release/seabox run --policy read-only -- \
     ./syscall_probe 165 0 0 0 0 0 0 2>&1 | grep -v BLOCKED-SYSCALL
 # 若 landlock 拦截先发生，stderr 不一定带 marker——此 case 仅观察 stderr 富消息路径是否生效
 ```

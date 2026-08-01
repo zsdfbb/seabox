@@ -15,5 +15,5 @@
 | CommandOutput | `{ exit_code: i32, blocked_syscall: Option<(u32, u32)> }`。`blocked_syscall` 仅在 seccomp USER_NOTIF 拦截发生时记录 `(syscall_nr, arch)` |
 | ExitReason | `Sandbox` trait 对命令退出方式的分类：`Ok` / `Denied { mechanism: DenyMechanism, message }` / `Program(i32)` / `InternalError(String)`。`classify_exit(exit_code, blocked)` 决定。优先级：blocked 结构化数据 > exit_code=126(Landlock) > exit_code=0(OK) > exit_code=31/159(Seccomp SIGSYS) > 其他 |
 | DenyMechanism | 拒绝机制枚举：`Landlock`（文件系统 ACL 拒绝）、`Seccomp`（syscall 过滤拒绝）、`Unknown` |
-| CLI 子命令 | `sandbox-runtime run [--landlock path:perm...] [--allow-network] [--seccomp-deny-nr NR...] [--seccomp-filter-fd FD...] -- <COMMAND>`、`sandbox-runtime check`、`sandbox-runtime serve`（stub） |
+| CLI 子命令 | `seabox run [--landlock path:perm...] [--allow-network] [--seccomp-deny-nr NR...] [--seccomp-filter-fd FD...] -- <COMMAND>`、`seabox check`、`seabox serve`（stub） |
 | Landlock 权限展开 | `expand_perm()` 支持预设组合：`ro`/`rx`(execute+read-file+read-dir), `rw`(ro+write), `rwx`(rw+make-sock/fifo/block/char), `all`(rwx+refer+ioctl-dev)。个体权限名直通 `LandlockPerm` 枚举 |

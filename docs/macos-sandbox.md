@@ -45,4 +45,4 @@
 | 网络粒度 | on/off（当前占位） | on/off |
 | 进程隔离 | user_ns + (可选) PID_ns | 无对应 |
 
-macOS 网络隔离只到 on/off 粒度是 Seatbelt 的固有限制，跟 sandbox-runtime (TS) 行为一致。
+macOS 网络隔离只到 on/off 粒度是 Seatbelt 的固有限制，跟 seabox (TS) 行为一致。

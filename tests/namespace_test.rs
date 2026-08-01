@@ -1,6 +1,6 @@
 //! 命名空间隔离端到端测试。
 //!
-//! 这些测试验证 sandbox-runtime 的命名空间隔离功能：user/net/pid/uts/ipc/cgroup
+//! 这些测试验证 seabox 的命名空间隔离功能：user/net/pid/uts/ipc/cgroup
 //! 命名空间的创建、UID/GID 映射、hostname 设置、chdir、clearenv 等。
 //!
 //! 需要 Linux，缺少 namespace 支持时自动跳过。
@@ -32,7 +32,7 @@
 
 use std::process::{Command, Stdio};
 
-use sandbox_runtime::linux::namespaces;
+use seabox::linux::namespaces;
 
 // ---------------------------------------------------------------------------
 // 基础辅助
@@ -40,7 +40,7 @@ use sandbox_runtime::linux::namespaces;
 
 /// 由 Cargo 在集成测试中自动注入的二进制绝对路径。
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_sandbox-runtime")
+    env!("CARGO_BIN_EXE_seabox")
 }
 
 /// 子进程结果。
@@ -51,14 +51,14 @@ struct RunOutput {
     stderr: String,
 }
 
-/// 以子进程方式调用 `sandbox-runtime`，捕获退出码与双向输出。
+/// 以子进程方式调用 `seabox`，捕获退出码与双向输出。
 fn run_cli(args: &[&str]) -> RunOutput {
     let output = Command::new(bin())
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to spawn sandbox-runtime binary");
+        .expect("failed to spawn seabox binary");
 
     RunOutput {
         exit_code: output.status.code(),
