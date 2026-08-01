@@ -3,7 +3,7 @@
 //! 验证：
 //! - N22: `--unshare-net --allow-network` → lo UP
 //! - N23: `--unshare-net` 不加 `--allow-network` → lo DOWN
-//! - N24: `--share-net` 等价于 `--allow-network`
+//! - N24: `--share-net` 抑制 `--unshare-net`
 //! - N25: seccomp 与网络配置共存
 //! - N26: `--share-net --unshare-net` 冲突 — `--share-net` 获胜
 
@@ -135,7 +135,7 @@ fn unshare_net_lo_down() {
 }
 
 // ---------------------------------------------------------------------------
-// N24: --share-net 等价于 --allow-network
+// N24: --share-net 抑制 --unshare-net
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -184,12 +184,16 @@ fn seccomp_with_network() {
 }
 
 // ---------------------------------------------------------------------------
-// N26: --allow-network 和 --share-net 语义等价
+// N26: --allow-network 与 --share-net 正交（不抑制隔离）
 // ---------------------------------------------------------------------------
 
 #[test]
-fn allow_network_and_share_net_are_equivalent() {
-    // --allow-network 不带 --unshare-net：抑制 netns
+fn allow_network_does_not_suppress_unshare_net() {
+    if skip_if_no_net_ns() {
+        return;
+    }
+    // --allow-network 不抑制 --unshare-net：两者正交。
+    // 该组合正常执行（隔离 netns + lo UP，lo 状态由 N22 验证）。
     let out: RunOutput = run_cli(&["run", "--allow-network", "--unshare-net", "--", "true"]).into();
 
     assert_eq!(

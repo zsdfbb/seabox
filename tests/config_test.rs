@@ -18,10 +18,7 @@ fn test_expand_tilde() {
     assert!(!bare.starts_with('~'), "bare tilde should expand");
 
     // ~otheruser 保持不变（只有开头的 ~/ 或单独的 ~ 会被展开）
-    assert_eq!(
-        seabox::config::expand_tilde("~otheruser"),
-        "~otheruser"
-    );
+    assert_eq!(seabox::config::expand_tilde("~otheruser"), "~otheruser");
 
     // 不含 ~ 的绝对路径 -> 原样
     assert_eq!(

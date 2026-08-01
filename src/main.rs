@@ -27,13 +27,12 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
     name = "seabox",
     about = "Landlock + seccomp + namespace 沙箱",
     long_about = "\
-为 AI Agent（Claude Code、CodeWhale、Cursor……）设计的 Linux 沙箱。\
- 在 OS 层面强制施加文件系统与进程限制，无需容器运行时。
+为 AI Agent 设计的跨平台 OS 级沙箱。\
+ 在 OS 层面强制施加文件系统与进程限制，无需容器运行时。\
+ 当前支持 Linux（Landlock + seccomp + namespaces），macOS 计划中。
 
 核心理念：Agent 每次执行命令都应默认受限。\
  配置一次策略，Agent 自动遵守。
-
-等价于 bubblewrap 的『功能超集 + Landlock 文件系统 ACL』。
 "
 )]
 #[allow(clippy::large_enum_variant)]
@@ -56,7 +55,8 @@ enum Cli {
 
         /// 共享宿主机网络（bwrap 兼容别名）
         ///
-        /// 等价于 --allow-network。抑制 --unshare-net 的效果。
+        /// 优先级最高：抑制 --unshare-net 的隔离效果。
+        /// 与 --allow-network 不同——后者在 --unshare-net 时放通 loopback，不抑制隔离。
         #[arg(long)]
         share_net: bool,
 
@@ -201,7 +201,7 @@ enum Cli {
 
     /// 检查当前系统可用的沙箱能力
     ///
-    /// 显示 Landlock ABI 版本、seccomp 可用性、以及 6 种 namespace
+    /// 显示 Landlock ABI 版本、seccomp 可用性、以及 7 种 namespace
     /// 在当前内核上的支持情况。
     Check,
 
@@ -479,23 +479,21 @@ fn cmd_serve(port: u16) -> anyhow::Result<()> {
 // 配置辅助函数
 // ---------------------------------------------------------------------------
 
-/// 解析网络标志冲突，返回 (effective_net, effective_network)。
+/// 解析网络标志冲突，返回 (是否隔离 netns, 是否放通 loopback)。
 ///
-/// `--share-net` 或 `--allow-network` 会抑制 `--unshare-net`，使宿主机网络保持可用。
-/// 最后 flag 获胜。
+/// - `--share-net` 强制共享宿主机网络（bwrap 兼容别名），抑制 netns 隔离。
+/// - `--allow-network` 只放通 loopback：配合 `--unshare-net` 时在隔离 netns 内
+///   lo UP（127.0.0.1/8）；不隔离时对宿主机网络无效果。
+/// - 两者相互正交，互不抑制。
 fn resolve_network_config(
     unshare_net: bool,
     share_net: bool,
     allow_network: bool,
     unshare_all: bool,
 ) -> (bool, bool) {
-    if share_net || allow_network {
-        (false, true)
-    } else if unshare_net || unshare_all {
-        (true, false)
-    } else {
-        (false, false)
-    }
+    let effective_net = !share_net && (unshare_net || unshare_all);
+    let effective_loopback = allow_network;
+    (effective_net, effective_loopback)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -553,4 +551,75 @@ fn build_config(
         seccomp_deny_nrs: vec![],
         seccomp_filter_bytes: vec![],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_network_config;
+
+    #[test]
+    fn default_no_network_flags() {
+        assert_eq!(
+            resolve_network_config(false, false, false, false),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn unshare_net_isolates() {
+        assert_eq!(
+            resolve_network_config(true, false, false, false),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn allow_network_is_orthogonal_to_unshare_net() {
+        // 核心修复：--unshare-net --allow-network → 隔离 netns + lo UP
+        assert_eq!(
+            resolve_network_config(true, false, true, false),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn allow_network_alone_does_not_isolate() {
+        assert_eq!(
+            resolve_network_config(false, false, true, false),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn share_net_suppresses_unshare_net() {
+        assert_eq!(
+            resolve_network_config(true, true, false, false),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn share_net_beats_allow_network_for_isolation() {
+        // share-net 抑制隔离；allow-network 仍设 loopback 标志（无 netns 时无效）
+        assert_eq!(
+            resolve_network_config(true, true, true, false),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn unshare_all_isolates_net() {
+        assert_eq!(
+            resolve_network_config(false, false, false, true),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn unshare_all_with_allow_network_loopback() {
+        assert_eq!(
+            resolve_network_config(false, false, true, true),
+            (true, true)
+        );
+    }
 }
