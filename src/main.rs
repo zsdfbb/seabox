@@ -98,6 +98,7 @@ enum Cli {
         ///
         /// 子进程拥有独立的网络栈（默认 lo DOWN，无网络访问）。
         /// 配合 --allow-network 可放通 loopback。
+        /// 非 root 下自动启用 user namespace。
         #[arg(long)]
         unshare_net: bool,
         /// 隔离 UTS 命名空间
@@ -521,10 +522,12 @@ fn build_config(
         .map(|s| parse_landlock_spec(s))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    // --unshare-pid 在非 root 下需要 user ns 来获取 CAP_SYS_ADMIN
+    // --unshare-pid / --unshare-net 在非 root 下需要 user ns 来获取 CAP_SYS_ADMIN
     let pid_without_user = unshare_pid && !unshare_all && !unshare_user;
     let need_user_for_pid = pid_without_user && unsafe { libc::geteuid() } != 0;
-    let effective_user = unshare_user || unshare_all || need_user_for_pid;
+    let net_without_user = unshare_net && !unshare_all && !unshare_user;
+    let need_user_for_net = net_without_user && unsafe { libc::geteuid() } != 0;
+    let effective_user = unshare_user || unshare_all || need_user_for_pid || need_user_for_net;
 
     Ok(SandboxConfig {
         landlock: rules,

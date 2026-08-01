@@ -164,10 +164,23 @@ fn unshare_net_isolates() {
     if skip_if_no_net_ns() {
         return;
     }
-    let out = run_cli(&["run", "--unshare-net", "--", "ls", "/sys/class/net"]);
-    assert_eq!(out.exit_code, Some(0), "unshare-net ls: {:?}", out);
-    // netns 中只有 lo
-    assert_eq!(out.stdout.trim(), "lo", "only lo should exist in new netns");
+    // 注意：不能用 `ls /sys/class/net` 断言——新 netns 中 /sys 是未重挂载的
+    // 旧 sysfs 视图，仍显示宿主机接口。netns 隔离用 inode 对比才是可靠判断。
+    let host_ns = std::fs::read_link("/proc/self/ns/net").expect("host netns link");
+    let out = run_cli(&[
+        "run",
+        "--unshare-net",
+        "--",
+        "readlink",
+        "/proc/self/ns/net",
+    ]);
+    assert_eq!(out.exit_code, Some(0), "unshare-net readlink: {:?}", out);
+    let sandbox_ns = out.stdout.trim();
+    assert_ne!(
+        sandbox_ns,
+        format!("{}", host_ns.display()),
+        "netns should differ from host; host={host_ns:?} sandbox={sandbox_ns:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

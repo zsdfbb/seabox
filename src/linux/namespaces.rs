@@ -229,10 +229,57 @@ pub fn is_pid_namespace_available() -> bool {
 
 /// 检查当前内核是否支持网络命名空间（`CLONE_NEWNET`）。
 ///
+/// 非特权进程无法直接创建 netns（需要 CAP_SYS_ADMIN），但可先进入
+/// user namespace 获得该命名空间内的全部 capabilities 再创建（rootless
+/// 容器原理）。因此探测同时覆盖两条路径。
+///
 /// 结果由 `OnceLock` 缓存。
 pub fn is_net_namespace_available() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
-    *CACHE.get_or_init(|| fork_and_try_unshare(libc::CLONE_NEWNET))
+    *CACHE.get_or_init(fork_and_try_net)
+}
+
+/// 内部辅助：`fork()` 子进程尝试创建网络命名空间。
+///
+/// 先直接 `unshare(CLONE_NEWNET)`（root 或已有 CAP_SYS_ADMIN 时成功）；
+/// 失败则退化为 `unshare(CLONE_NEWUSER)` → `unshare(CLONE_NEWNET)`
+/// （无特权 userns 路径，与 child_setup 的实际 unshare 顺序一致）。
+///
+/// 子进程全程仅调用 async-signal-safe 的 libc 函数，不做堆操作。
+fn fork_and_try_net() -> bool {
+    // SAFETY：fork(2) 是 async-signal-safe 的。子进程只调用
+    // async-signal-safe 的 unshare/_exit；父进程调用 waitpid。
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        // fork 失败——不能确定可用性，保守返回 false。
+        return false;
+    }
+
+    if pid == 0 {
+        // ── 子进程 ──
+        // SAFETY：unshare(2) / _exit(2) 均为 async-signal-safe。
+        let exit_code = unsafe {
+            // `||` 短路：直接 unshare 成功则跳过 userns 路径；失败才退化尝试。
+            if libc::unshare(libc::CLONE_NEWNET) == 0
+                || (libc::unshare(libc::CLONE_NEWUSER) == 0
+                    && libc::unshare(libc::CLONE_NEWNET) == 0)
+            {
+                0
+            } else {
+                1
+            }
+        };
+        unsafe { libc::_exit(exit_code) };
+    }
+
+    // ── 父进程 ──
+    // SAFETY：waitpid 等待子进程退出。status 由 waitpid 内核写入。
+    let mut status: libc::c_int = 0;
+    let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+    if waited < 0 {
+        return false;
+    }
+    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
 }
 
 /// 检查当前内核是否支持 UTS 命名空间（`CLONE_NEWUTS`）。

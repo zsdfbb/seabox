@@ -124,12 +124,14 @@ fn unshare_net_lo_down() {
         out.exit_code,
         out.stderr
     );
-    assert_eq!(
-        out.stdout.trim(),
-        "down",
-        "expected lo operstate 'down', got '{:?}'. \
+    // 新建 netns 的 lo operstate 随内核而异：旧内核为 "down"，
+    // 新内核（lo 自带 127.0.0.1/8）为 "unknown"（管理 up 但无 carrier）。
+    // 两种都表示"未运行"，只有 "up" 表示完全可用。
+    let operstate = out.stdout.trim();
+    assert!(
+        operstate != "up",
+        "expected lo operstate not 'up', got '{operstate}'. \
          stderr: {}",
-        out.stdout.trim(),
         out.stderr
     );
 }
