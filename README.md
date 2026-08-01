@@ -40,10 +40,8 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 
 | 平台 | 状态 | 机制 |
 |---|---|---|
-| Linux 5.13+ | ✅ 可用 | Landlock + seccomp + namespaces |
-| Linux 3.5 – 5.12 | ⚠️ 部分可用 | 仅 seccomp（无 Landlock 文件系统限制） |
-| Linux < 3.5 | ❌ 不可用 | 内核不支持 seccomp |
-| macOS | 🚧 计划中 | Seatbelt (`sandbox-exec`) |
+| Linux 5.13+ | ✅ | Landlock + seccomp + namespaces |
+| Linux 3.5 – 5.12 | ⚠️ 部分可用 | seccomp（无 Landlock 文件系统限制） |
 
 ## 安装
 
