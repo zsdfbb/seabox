@@ -1,6 +1,15 @@
 # seabox
 
-一个为 **AI Agent**（Claude Code、CodeWhale、Cursor……）设计的 **Linux 沙箱**：在 OS 层面强制施加文件系统与进程限制，**无需容器运行时**。目标是 **bubblewrap 的功能超集 + Landlock 文件系统 ACL**。
+一个为 **AI Agent** 设计的**跨平台 OS 级沙箱**：在操作系统层面强制施加文件系统与进程限制，**无需容器运行时**。当前支持 **Linux**，macOS（Seatbelt）与更多平台在规划中。
+
+**设计目标**：让 Agent 的命令执行默认受限，用可声明的策略建立安全边界。
+
+- 跨平台：平台无关的 `Sandbox` trait，各平台用原生机制实现（Linux = Landlock + seccomp + namespaces；macOS = Seatbelt 规划中）
+- 文件系统：**Landlock ACL**（路径级读/写/执行，声明式、零挂载）
+- 进程隔离：**7 种 namespace**（user/ipc/mnt/pid/net/uts/cgroup）
+- syscall 过滤：**动态 seccomp**（精确拦截 + USER_NOTIF 结构化诊断）
+- 超时控制，防止命令无限挂起
+- CLI + Crate API 双集成，结构化退出原因
 
 > 名字取自 CodeWhale（鲸鱼）的栖息地 **sea** + sandbox 的 **box**——装着鲸鱼的那片海。
 
@@ -14,18 +23,6 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 2. **粒度过粗**：要么全允许、要么全拒绝，没有中间态
 
 **内核级沙箱**用**策略驱动**解决：用户事先声明文件系统权限（`--landlock /:ro --landlock /tmp:rw`）和 syscall 黑名单（`--seccomp-deny-nr 165`），Agent 在策略范围内自动放行，越界时精确拦截并给出结构化诊断。
-
-### 与 bubblewrap 的定位差异
-
-| 维度 | bubblewrap | seabox |
-|------|-----------|--------|
-| 文件系统 | 手动 bind mount（`--ro-bind` / `--tmpfs`） | **Landlock ACL**（`--landlock /:ro`，声明式、零挂载） |
-| seccomp | 仅外部原始 BPF（`--seccomp FD`） | 外部 BPF + **`--seccomp-deny-nr` 精确拦截 + USER_NOTIF 诊断** |
-| 超时控制 | 无 | `--timeout` / `--timeout-max` |
-| 使用方式 | CLI only | CLI + **Crate API**（`SandboxConfig::with_*`） |
-| 能力检查 | 无 | `seabox check` |
-| 外部网络 | `--share-net`（二选一） | `--allow-network`（与 `--unshare-net` 正交组合） |
-| 特权降级 | `--cap-drop ALL` | **user ns 自动降级**（ns 内无特权） |
 
 ## 特性
 
