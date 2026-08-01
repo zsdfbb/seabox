@@ -83,9 +83,11 @@ fn allow_network_lo_up() {
     .into();
 
     assert_eq!(
-        out.exit_code, Some(0),
+        out.exit_code,
+        Some(0),
         "expected exit 0, got {:?}. stderr: {}",
-        out.exit_code, out.stderr
+        out.exit_code,
+        out.stderr
     );
     assert!(
         out.stdout.trim() == "up" || out.stdout.trim() == "unknown",
@@ -116,9 +118,11 @@ fn unshare_net_lo_down() {
     .into();
 
     assert_eq!(
-        out.exit_code, Some(0),
+        out.exit_code,
+        Some(0),
         "expected exit 0, got {:?}. stderr: {}",
-        out.exit_code, out.stderr
+        out.exit_code,
+        out.stderr
     );
     assert_eq!(
         out.stdout.trim(),
@@ -137,14 +141,7 @@ fn unshare_net_lo_down() {
 #[test]
 fn share_net_flag_works() {
     // --share-net 应该抑制 --unshare-net
-    let out: RunOutput = run_cli(&[
-        "run",
-        "--share-net",
-        "--unshare-net",
-        "--",
-        "true",
-    ])
-    .into();
+    let out: RunOutput = run_cli(&["run", "--share-net", "--unshare-net", "--", "true"]).into();
 
     assert_eq!(
         out.exit_code,
@@ -193,14 +190,7 @@ fn seccomp_with_network() {
 #[test]
 fn allow_network_and_share_net_are_equivalent() {
     // --allow-network 不带 --unshare-net：抑制 netns
-    let out: RunOutput = run_cli(&[
-        "run",
-        "--allow-network",
-        "--unshare-net",
-        "--",
-        "true",
-    ])
-    .into();
+    let out: RunOutput = run_cli(&["run", "--allow-network", "--unshare-net", "--", "true"]).into();
 
     assert_eq!(
         out.exit_code,
@@ -219,13 +209,7 @@ fn allow_network_and_share_net_are_equivalent() {
 fn share_net_bwrap_compat() {
     // bwrap --share-net 只是不隔离 netns，这里检查 sandbox-runtime
     // 的 --share-net 是否也不隔离（可以用 --unshare-net 覆盖验证）
-    let out: RunOutput = run_cli(&[
-        "run",
-        "--share-net",
-        "--",
-        "true",
-    ])
-    .into();
+    let out: RunOutput = run_cli(&["run", "--share-net", "--", "true"]).into();
 
     assert_eq!(
         out.exit_code,

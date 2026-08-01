@@ -1,6 +1,6 @@
+use sandbox_runtime::{CommandSpec, Sandbox};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use sandbox_runtime::{CommandSpec, Sandbox};
 
 /// 多线程并发 fork 压力测试。
 ///
@@ -34,8 +34,7 @@ fn concurrent_fork_stress() {
             assert_eq!(
                 output.0.exit_code, 0,
                 "iteration {}: expected exit 0, got {}",
-                i,
-                output.0.exit_code
+                i, output.0.exit_code
             );
         }
     });

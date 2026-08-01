@@ -323,7 +323,8 @@ fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), ()> {
 
     // cmsg 缓冲区：容纳一个 cmsghdr + 一个 i32 fd。
     // CMSG_SPACE(sizeof(i32)) = 24 字节（在 64 位 Linux 上）。
-    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as libc::c_uint) } as usize;
+    let cmsg_space =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as libc::c_uint) } as usize;
     let mut cmsg_buf = [MaybeUninit::<u8>::uninit(); 64];
     if cmsg_space > cmsg_buf.len() {
         return Err(());

@@ -100,7 +100,9 @@ impl SandboxImpl for LinuxSandbox {
         let bpf_filter = self.build_bpf_filter();
         let has_deny = bpf_filter.is_some();
         // ── 预对齐外部 BPF filter（修复 from_raw_parts 对齐 UB）──
-        let aligned_ext_filters: Vec<Vec<seccomp::sock_filter>> = self.config.seccomp_filter_bytes
+        let aligned_ext_filters: Vec<Vec<seccomp::sock_filter>> = self
+            .config
+            .seccomp_filter_bytes
             .iter()
             .map(|bytes| {
                 assert!(
@@ -161,22 +163,40 @@ impl SandboxImpl for LinuxSandbox {
         let ns_ops: Vec<child_setup::NsOp> = {
             let mut v = Vec::new();
             if effective_user {
-                v.push(child_setup::NsOp { flag: libc::CLONE_NEWUSER, try_mode: ns.user_try as i32 });
+                v.push(child_setup::NsOp {
+                    flag: libc::CLONE_NEWUSER,
+                    try_mode: ns.user_try as i32,
+                });
             }
             if ns.mnt {
-                v.push(child_setup::NsOp { flag: libc::CLONE_NEWNS, try_mode: 0 });
+                v.push(child_setup::NsOp {
+                    flag: libc::CLONE_NEWNS,
+                    try_mode: 0,
+                });
             }
             if ns.ipc {
-                v.push(child_setup::NsOp { flag: libc::CLONE_NEWIPC, try_mode: 0 });
+                v.push(child_setup::NsOp {
+                    flag: libc::CLONE_NEWIPC,
+                    try_mode: 0,
+                });
             }
             if ns.net {
-                v.push(child_setup::NsOp { flag: libc::CLONE_NEWNET, try_mode: 0 });
+                v.push(child_setup::NsOp {
+                    flag: libc::CLONE_NEWNET,
+                    try_mode: 0,
+                });
             }
             if ns.uts {
-                v.push(child_setup::NsOp { flag: libc::CLONE_NEWUTS, try_mode: 0 });
+                v.push(child_setup::NsOp {
+                    flag: libc::CLONE_NEWUTS,
+                    try_mode: 0,
+                });
             }
             if ns.cgroup {
-                v.push(child_setup::NsOp { flag: libc::CLONE_NEWCGROUP, try_mode: ns.cgroup_try as i32 });
+                v.push(child_setup::NsOp {
+                    flag: libc::CLONE_NEWCGROUP,
+                    try_mode: ns.cgroup_try as i32,
+                });
             }
             v
         };
@@ -194,12 +214,12 @@ impl SandboxImpl for LinuxSandbox {
         let hostname_bytes: Option<Vec<u8>> = ns.hostname.as_ref().map(|h| h.as_bytes().to_vec());
 
         // ── 预计算 envp（"KEY=val\0" NULL-terminated 数组）──
-        let envp_cstrings: Vec<CString> = spec.env
+        let envp_cstrings: Vec<CString> = spec
+            .env
             .iter()
             .map(|(k, v)| CString::new(format!("{}={}", k, v)).unwrap_or_default())
             .collect();
-        let mut envp: Vec<*const libc::c_char> =
-            envp_cstrings.iter().map(|s| s.as_ptr()).collect();
+        let mut envp: Vec<*const libc::c_char> = envp_cstrings.iter().map(|s| s.as_ptr()).collect();
         envp.push(std::ptr::null());
 
         // ── 预计算 argv（program + args, NULL-terminated）──
@@ -207,8 +227,7 @@ impl SandboxImpl for LinuxSandbox {
             .chain(spec.args.clone())
             .map(|a| CString::new(a).unwrap_or_default())
             .collect();
-        let mut argv: Vec<*const libc::c_char> =
-            argv_cstrings.iter().map(|a| a.as_ptr()).collect();
+        let mut argv: Vec<*const libc::c_char> = argv_cstrings.iter().map(|a| a.as_ptr()).collect();
         argv.push(std::ptr::null());
 
         // ── 预计算 cwd CString（chdir 用）──
@@ -220,8 +239,8 @@ impl SandboxImpl for LinuxSandbox {
         // ── 预计算 mount 操作 ──────────────────────────────────
         let mount_config = &self.config.mount;
         let has_mounts = !mount_config.specs.is_empty() || mount_config.enabled;
-        let (mount_ops, _mount_ops_cstrings) = prepare_mount_ops(mount_config)
-            .with_context(|| "failed to prepare mount ops")?;
+        let (mount_ops, _mount_ops_cstrings) =
+            prepare_mount_ops(mount_config).with_context(|| "failed to prepare mount ops")?;
         let mount_ops_ptr = mount_ops.as_ptr();
         let mount_ops_len = mount_ops.len();
         let do_private = has_mounts;
@@ -254,7 +273,10 @@ impl SandboxImpl for LinuxSandbox {
                     envp.as_ptr(),
                     cwd_c.as_ptr(),
                     raw_ruleset_fd,
-                    bpf_filter.as_ref().map(|f| f.as_ptr()).unwrap_or(std::ptr::null()),
+                    bpf_filter
+                        .as_ref()
+                        .map(|f| f.as_ptr())
+                        .unwrap_or(std::ptr::null()),
                     bpf_filter.as_ref().map(|f| f.len()).unwrap_or(0),
                     child_fd_raw,
                     parent_fd_raw_for_child,
@@ -268,7 +290,10 @@ impl SandboxImpl for LinuxSandbox {
                     uid_map_content.len(),
                     gid_map_content.as_ptr(),
                     gid_map_content.len(),
-                    hostname_bytes.as_ref().map(|h| h.as_ptr()).unwrap_or(std::ptr::null()),
+                    hostname_bytes
+                        .as_ref()
+                        .map(|h| h.as_ptr())
+                        .unwrap_or(std::ptr::null()),
                     hostname_bytes.as_ref().map(|h| h.len()).unwrap_or(0),
                     configure_lo,
                     mount_ops_ptr,
@@ -449,23 +474,23 @@ fn resolve_exec_path(program: &str, spec_env: &HashMap<String, String>) -> CStri
 /// 调用方必须保证返回的 `cstrings` Vec 在 `enter_child` 调用期间存活。
 /// `prepare_mount_ops` 预分配了足够容量避免后续 reallocation，
 /// 因此返回的 ops 指针在 `cstrings` 生命周期内稳定有效。
-fn prepare_mount_ops(config: &MountConfig) -> anyhow::Result<(Vec<mount::RawMountOp>, Vec<CString>)> {
+fn prepare_mount_ops(
+    config: &MountConfig,
+) -> anyhow::Result<(Vec<mount::RawMountOp>, Vec<CString>)> {
     // ── 预检：检查 source/target 路径存在性 ──────────────────────
     for (i, spec) in config.specs.iter().enumerate() {
         let target = std::path::Path::new(&spec.target);
         if !target.exists() {
             anyhow::bail!(
                 "mount #{}: target path '{}' does not exist",
-                i + 1, spec.target
+                i + 1,
+                spec.target
             );
         }
         if spec.fstype == "none" {
             if let Some(ref src) = spec.source {
                 if !std::path::Path::new(src).exists() {
-                    anyhow::bail!(
-                        "mount #{}: source path '{}' does not exist",
-                        i + 1, src
-                    );
+                    anyhow::bail!("mount #{}: source path '{}' does not exist", i + 1, src);
                 }
             }
         }
@@ -512,8 +537,7 @@ fn prepare_mount_ops(config: &MountConfig) -> anyhow::Result<(Vec<mount::RawMoun
                         flags: (mount::MS_BIND
                             | mount::MS_REMOUNT
                             | mount::MS_RDONLY
-                            | mount::MS_REC)
-                            as libc::c_ulong,
+                            | mount::MS_REC) as libc::c_ulong,
                         data: std::ptr::null(),
                     });
                 } else {

@@ -124,12 +124,7 @@ fn mount_tmpfs_works() {
         "ls",
         tmpdir_str,
     ]);
-    assert_eq!(
-        out.exit_code,
-        Some(0),
-        "tmpfs ls should succeed: {:?}",
-        out
-    );
+    assert_eq!(out.exit_code, Some(0), "tmpfs ls should succeed: {:?}", out);
     assert!(
         out.stdout.trim().is_empty(),
         "tmpfs should be initially empty, got: {:?}",
@@ -329,9 +324,7 @@ fn mount_multiple_ops() {
         "--",
         "sh",
         "-c",
-        &format!(
-            "cat {dst1_str}/a.txt && touch {tmpdir_str}/tmpfile && ls {tmpdir_str}"
-        ),
+        &format!("cat {dst1_str}/a.txt && touch {tmpdir_str}/tmpfile && ls {tmpdir_str}"),
     ]);
     assert_eq!(
         out.exit_code,

@@ -623,11 +623,7 @@ fn deny_nr_multiple_blocks_both() {
         return;
     }
     // mount 被拦截
-    assert_deny_nr_blocked(
-        &["165", "97"],
-        mount_nr(),
-        &["0", "0", "0", "0", "0", "0"],
-    );
+    assert_deny_nr_blocked(&["165", "97"], mount_nr(), &["0", "0", "0", "0", "0", "0"]);
     // unshare 也被拦截
     assert_deny_nr_blocked(&["165", "97"], unshare_nr(), &["0"]);
 }

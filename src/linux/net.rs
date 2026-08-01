@@ -13,19 +13,19 @@ use std::os::unix::io::RawFd;
 // 内核常量（全部从 uapi 头文件翻译，man:rtnetlink(7)）
 // ---------------------------------------------------------------------------
 
-const AF_NETLINK: libc::c_int = 16;          // linux/net.h
-const NETLINK_ROUTE: libc::c_int = 0;         // uapi/linux/netlink.h
-const RTM_NEWADDR: u16 = 20;                  // uapi/linux/rtnetlink.h
+const AF_NETLINK: libc::c_int = 16; // linux/net.h
+const NETLINK_ROUTE: libc::c_int = 0; // uapi/linux/netlink.h
+const RTM_NEWADDR: u16 = 20; // uapi/linux/rtnetlink.h
 const RTM_NEWLINK: u16 = 16;
-const IFA_LOCAL: u16 = 2;                     // uapi/linux/if_addr.h
+const IFA_LOCAL: u16 = 2; // uapi/linux/if_addr.h
 const IFA_ADDRESS: u16 = 1;
-const NLM_F_REQUEST: u16 = 1;                 // uapi/linux/netlink.h
+const NLM_F_REQUEST: u16 = 1; // uapi/linux/netlink.h
 const NLM_F_ACK: u16 = 4;
 const NLM_F_EXCL: u16 = 0x200;
 const NLM_F_CREATE: u16 = 0x400;
 const NLMSG_ALIGNTO: usize = 4;
-const IFF_UP: u32 = 0x1;                      // linux/if.h
-const AF_INET: u8 = 2;                        // linux/in.h
+const IFF_UP: u32 = 0x1; // linux/if.h
+const AF_INET: u8 = 2; // linux/in.h
 
 // ---------------------------------------------------------------------------
 // 自定 NETLINK 结构体（libc 不保证暴露这些，自己定义保证 ABI 稳定）
@@ -109,7 +109,11 @@ pub fn configure_loopback() {
 /// SAFETY: 仅在 fork 后的子进程中调用。
 unsafe fn configure_loopback_impl() -> Result<(), &'static [u8]> {
     // ── 1. 创建 NETLINK socket ────────────────────────────────────
-    let fd = libc::socket(AF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, NETLINK_ROUTE);
+    let fd = libc::socket(
+        AF_NETLINK,
+        libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+        NETLINK_ROUTE,
+    );
     if fd < 0 {
         return Err(b"socket(AF_NETLINK) failed\0");
     }
@@ -131,7 +135,7 @@ unsafe fn configure_loopback_impl() -> Result<(), &'static [u8]> {
     let nlh_len = mem::size_of::<Nlmsghdr>() as u32
         + mem::size_of::<Ifaddrmsg>() as u32
         + nlmsg_align(mem::size_of::<Rtattr>() + 4) as u32  // IFA_LOCAL
-        + nlmsg_align(mem::size_of::<Rtattr>() + 4) as u32;  // IFA_ADDRESS
+        + nlmsg_align(mem::size_of::<Rtattr>() + 4) as u32; // IFA_ADDRESS
     let nlh = Nlmsghdr {
         nlmsg_len: nlh_len,
         nlmsg_type: RTM_NEWADDR,
@@ -194,9 +198,9 @@ unsafe fn configure_loopback_impl() -> Result<(), &'static [u8]> {
     do_write(&mut link_buf, &mut link_off, as_u8_slice(&link_nlh));
 
     let ifi = Ifinfomsg {
-        ifi_family: 0,     // AF_UNSPEC
+        ifi_family: 0, // AF_UNSPEC
         ifi_pad: 0,
-        ifi_type: 0,       // kernel ignores ifi_type for RTM_NEWLINK
+        ifi_type: 0, // kernel ignores ifi_type for RTM_NEWLINK
         ifi_index: lo_index as i32,
         ifi_flags: IFF_UP,
         ifi_change: IFF_UP,
