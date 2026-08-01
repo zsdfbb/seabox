@@ -11,17 +11,22 @@
 
 **验证状态**：`cargo test` 全通过，`cargo clippy -- -D warnings` 零警告，`cargo fmt` 合规。
 
-## Phase 2 — Linux 完整进程隔离（🚧 进行中）
+## Phase 2 — Linux 完整进程隔离（✅ 已完成）
 
-- **user_namespace（netns 依赖）**：`unshare(CLONE_NEWUSER)` 让非特权进程能创建新的网络命名空间。这是 netns 的前置条件
-- **netns 网络阻断**：`unshare(CLONE_NEWNET)` + lo down，阻断子进程的网络访问能力
-  - 可选：放通 loopback（`ip link set lo up`）以允许本地通信
-- **新增 `--allow-network` 真实实现**：当前为占位 flag，Phase 2 接入 netns 后生效
-- **动态 seccomp 策略**：允许按分类在 `SandboxConfig` 中增删黑名单 syscall（如放行 ptrace、额外拦截 `clone3`）
+- ✅ user namespace + uid/gid 映射（非 root 自动启用，ns 内无特权）
+- ✅ netns 网络阻断（`unshare(CLONE_NEWNET)` + lo DOWN）+ `--allow-network` 放通 loopback（NETLINK `SIOCSIFADDR` + lo UP）
+- ✅ PID namespace（非 root 下自动叠加 user ns，子进程为 PID 1/reaper）
+- ✅ UTS / IPC / Cgroup namespace
+- ✅ mount namespace（`--unshare-mnt`）+ `--bind` / `--ro-bind` / `--tmpfs`
+- ✅ 动态 seccomp（`--seccomp-deny-nr` / `--seccomp-filter-fd`）
+- ✅ fork 后子进程零堆操作（ADR 0003，多线程安全）
+- ✅ 21+ 项 namespace 端到端测试 + mount / network / concurrent-fork 专项测试
 
-**依赖**：当前 seccomp 黑名单已拦截 `unshare(CLONE_NEWUSER)` ——
-Phase 2 需在 `pre_exec` 中**先** `unshare`，**后**加载 seccomp filter，
-否则 unshare 会被自身拦截。
+**关键顺序**：`pre_exec` 中**先** `unshare`、**后**加载 seccomp filter——否则 `unshare(CLONE_NEWUSER)` 会被自身黑名单拦截。
+
+**收尾**（已完成，设计见 `docs/arch/phase2-wrapup/` 与 `docs/arch/mount-namespace/`）：
+- `--allow-network` 真实实现（NETLINK lo UP），`--share-net` bwrap 兼容别名
+- mount ns 设计 + ADR + review
 
 ## Phase 2b — IP 级网络过滤（⏸️ 已搁置，待 Phase 4 时重新评估）
 
@@ -49,12 +54,17 @@ Phase 2b 原与 Phase 3、4 并行，现明确降级为 Phase 4 的前置依赖�
 - HTTP API serve 模式（OpenSandbox 兼容，axum）
 - TOML 配置模板
 
+> **2026-08 决策：HTTP API 暂缓。** 调研结论：
+> HTTP sandbox API（OpenSandbox、E2B、Daytona……）是"远程 microVM/容器沙箱"市场的标配，
+> 与本项目"本地 OS 沙箱（Landlock + seccomp + ns）"的威胁模型不匹配——加入该生态需要容器/K8s + 注入 daemon，
+> 现有消费者不会连本地 daemon。若日后做"嵌入 Agent 框架"的接入，优先考虑 **MCP tool server** 而非 HTTP。
+
 ## 阶段依赖关系
 
 ```
-Phase 1 (✅) ──→ Phase 2 (🚧) ──→ Phase 3 ──→ Phase 4 ──→ Phase 2b (⏸️)
-                     │                                            ↑
-                     └── Phase 2 收尾（当前）──── NETLINK lo UP ────┘
+Phase 1 (✅) ──→ Phase 2 (✅) ──→ Phase 3 ──→ Phase 4
+                     │
+                     └── 收尾（已完成）：mount ns + NETLINK lo UP
 ```
 
 Phase 2b 从"独立并行分支"改为"Phase 4 的前置依赖"：只有当 Phase 4 云/容器集成启动且有 IP 级过滤的具体需求时，才重新评估 eBPF 或 nftables 方案。

@@ -37,10 +37,10 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 ## 当前状态
 
 - ✅ **Phase 1**：Landlock 文件系统 ACL + seccomp BPF USER_NOTIF + CLI
-- ✅ **Phase 2**：6 种命名空间隔离（User/IPC/PID/Net/UTS/Cgroup）+ 动态 seccomp（`--seccomp-deny-nr` / `--seccomp-filter-fd`）+ 网络隔离与 loopback 控制
+- ✅ **Phase 2**：7 种命名空间隔离（User/IPC/Mount/PID/Net/UTS/Cgroup，含 `--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`）+ 动态 seccomp（`--seccomp-deny-nr` / `--seccomp-filter-fd`）+ 网络隔离与 loopback 控制（`--allow-network` / `--share-net`）
 - ⏸️ **Phase 2b**：IP 级网络过滤（原计划 eBPF aya，已搁置待 Phase 4 时重新评估）
 - 🚧 **Phase 3**：macOS Seatbelt 支持
-- 🚧 **Phase 4**：CodeWhale 集成 + HTTP API
+- 🚧 **Phase 4**：CodeWhale 集成 + HTTP API（2026-08 调研后 HTTP API 暂缓——HTTP sandbox API 是"远程 microVM/容器沙箱"市场的标配，与本项目"本地 OS 沙箱"定位不符，详见 `docs/development-phases.md`）
 
 ## 文档索引
 
@@ -55,6 +55,7 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 | [docs/adr/0002-config-landlock-rules.md](docs/adr/0002-config-landlock-rules.md) | ADR 002：SandboxConfig 扁平结构 + Raw Landlock 规则 |
 | [docs/adr/0003-fork-after-zero-heap.md](docs/adr/0003-fork-after-zero-heap.md) | ADR 003：fork 后子进程零堆操作（多线程 safe） |
 | [docs/arch/phase2-wrapup/](docs/arch/phase2-wrapup/) | Phase 2 收尾设计：`--allow-network` 方案、四方案对比、ADR、review |
+| [docs/arch/mount-namespace/](docs/arch/mount-namespace/) | mount ns 设计：`--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`、ADR、review |
 | [docs/learned.md](docs/learned.md) | 跨会话经验教训（踩坑记录） |
 | [CONTEXT.md](CONTEXT.md) | 领域词汇表 |
 
@@ -90,21 +91,27 @@ sandbox-runtime-rs/
 │   ├── config.rs               # SandboxConfig + Builder + NamespacesConfig
 │   ├── linux/
 │   │   ├── mod.rs              # LinuxSandbox + execute() + USER_NOTIF worker
+│   │   ├── child_setup.rs      # pre_exec 序列（unshare → mount → seccomp）
 │   │   ├── landlock.rs         # Landlock ruleset 构建
-│   │   ├── namespaces.rs       # 6 种 namespace unshare + 探测
+│   │   ├── namespaces.rs       # 7 种 namespace unshare + 探测
+│   │   ├── mount.rs            # RawMountOp + do_mounts + make_private
+│   │   ├── net.rs              # netns + loopback 配置（SIOCSIFADDR）
 │   │   └── seccomp.rs          # BPF filter + USER_NOTIF + prctl 安装
 │   └── bin/
 │       └── syscall_probe.rs    # seccomp 测试辅助二进制
 ├── tests/
 │   ├── config_test.rs          # 配置解析测试
+│   ├── concurrent_fork_test.rs # fork 后零堆操作（多线程安全）
 │   ├── deny_detect_test.rs     # ExitReason 分类测试
 │   ├── landlock_test.rs        # Landlock ACL 测试（需要 5.13+）
+│   ├── mount_test.rs           # mount namespace 集成测试
 │   ├── namespace_test.rs       # 21 个命名空间端到端测试
+│   ├── network_test.rs         # 网络隔离 + loopback 控制测试
 │   └── seccomp_test.rs         # seccomp 黑名单 + --seccomp-deny-nr 测试
-├── examples/                   # 当前均为 stub
-│   ├── cli_basic.rs
-│   ├── cli_from_toml.rs
-│   └── crate_api.rs
+├── examples/
+│   ├── cli_basic.rs            # 基础用法（Landlock + 执行 + 结果处理）
+│   ├── cli_from_toml.rs        # TOML 配置 → SandboxConfig → 执行
+│   └── crate_api.rs            # crate API 用法
 ```
 
 ## 常用命令
@@ -172,7 +179,10 @@ cargo check
 | `tests/deny_detect_test.rs` | `classify_exit()` 在各种 exit_code + blocked 组合下的分类 | Linux |
 | `tests/landlock_test.rs` | Landlock 实际 ACL 行为（库 API + CLI 二进制） | Linux 5.13+ |
 | `tests/seccomp_test.rs` | 13 个黑名单 syscall + `--seccomp-deny-nr` + 拒绝消息 | Linux + seccomp |
-| `tests/namespace_test.rs` | 6 种 namespace 隔离 + uid/gid/hostname + chdir + env | Linux |
+| `tests/namespace_test.rs` | 7 种 namespace 隔离 + uid/gid/hostname + chdir + env | Linux |
+| `tests/mount_test.rs` | mount ns（`--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`） | Linux |
+| `tests/network_test.rs` | netns 隔离 + `--allow-network` loopback 放通 | Linux |
+| `tests/concurrent_fork_test.rs` | fork 后子进程零堆操作（多线程安全） | Linux |
 
 跳过与预检：
 - 内核能力缺失时（无 Landlock / 无 seccomp / 无 namespace）测试**自动跳过**（打印 `Landlock not available, skipping test`），不是 fail。
