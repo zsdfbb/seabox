@@ -1,6 +1,6 @@
 [package]
 name = "seabox"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 default-run = "seabox"
 description = "A standalone Rust sandbox tool using Landlock + seccomp for filesystem and syscall isolation"
