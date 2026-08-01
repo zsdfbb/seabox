@@ -23,20 +23,40 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "sandbox-runtime")]
+#[command(
+    name = "sandbox-runtime",
+    about = "Landlock + seccomp + namespace 沙箱",
+    long_about = "\
+为 AI Agent（Claude Code、CodeWhale、Cursor……）设计的 Linux 沙箱。\
+ 在 OS 层面强制施加文件系统与进程限制，无需容器运行时。
+
+核心理念：Agent 每次执行命令都应默认受限。\
+ 配置一次策略，Agent 自动遵守。
+
+等价于 bubblewrap 的『功能超集 + Landlock 文件系统 ACL』。
+"
+)]
 #[allow(clippy::large_enum_variant)]
 enum Cli {
     /// 在沙箱内运行一条命令
     Run {
-        /// Landlock 路径权限规格，格式 path:perm1[,perm2...]
-        #[arg(long)]
+        /// Landlock 文件系统 ACL，格式 `path:perm`（可重复）
+        ///
+        /// 权限预设：ro（只读读执行）/ rw（读写）/ rwx（完全读写+设备创建）/ all（全部）
+        /// 示例：--landlock '/:ro' --landlock '/tmp:rw'
+        #[arg(long, value_name = "PATH:PERM")]
         landlock: Vec<String>,
 
-        /// 允许网络访问（正交于 --unshare-net，同义于 --share-net）
+        /// 在隔离 netns 中放通 loopback 网络
+        ///
+        /// 与 --unshare-net 正交组合：不加 --unshare-net 时无效果（主机网络已可用）；
+        /// 加 --unshare-net 时放通 lo 接口（127.0.0.1/8）
         #[arg(short = 'n', long)]
         allow_network: bool,
 
-        /// 共享宿主机网络（bwrap 兼容别名，等价于 --allow-network）
+        /// 共享宿主机网络（bwrap 兼容别名）
+        ///
+        /// 等价于 --allow-network。抑制 --unshare-net 的效果。
         #[arg(long)]
         share_net: bool,
 
@@ -44,104 +64,150 @@ enum Cli {
         #[arg(short = 'd', long)]
         debug: bool,
 
-        /// 所有的命名空间隔离
+        /// 隔离全部 7 种命名空间（user/ipc/mnt/pid/net/uts/cgroup）
+        ///
+        /// 非 root 下自动启用 user namespace。
         #[arg(long)]
         unshare_all: bool,
 
-        /// User 命名空间隔离
+        /// 隔离 user 命名空间
+        ///
+        /// 子进程拥有独立的 UID/GID 映射，ns 内无特权。
+        /// 非 root 下是 pid/net namespace 的前置依赖。
         #[arg(long)]
         unshare_user: bool,
-        /// IPC 命名空间隔离
+        /// 隔离 IPC 命名空间
+        ///
+        /// 子进程拥有独立的 System V IPC 和 POSIX 消息队列，
+        /// 无法与宿主机或其他容器通信。
         #[arg(long)]
         unshare_ipc: bool,
-        /// Mount 命名空间隔离（非 root 下需配合 --unshare-user）
+        /// 隔离 mount 命名空间
+        ///
+        /// 子进程拥有独立的挂载表，配合 --bind/--ro-bind/--tmpfs 使用。
+        /// 非 root 下需配合 --unshare-user。
         #[arg(long)]
         unshare_mnt: bool,
-        /// PID 命名空间隔离
+        /// 隔离 PID 命名空间
+        ///
+        /// 子进程无法看到宿主机进程；自身为 PID 1（实际为 reaper）。
+        /// 非 root 下自动启用 user namespace。
         #[arg(long)]
         unshare_pid: bool,
-        /// 网络命名空间隔离
+        /// 隔离网络命名空间
+        ///
+        /// 子进程拥有独立的网络栈（默认 lo DOWN，无网络访问）。
+        /// 配合 --allow-network 可放通 loopback。
         #[arg(long)]
         unshare_net: bool,
-        /// UTS 命名空间隔离
+        /// 隔离 UTS 命名空间
+        ///
+        /// 子进程拥有独立的 hostname/domainname。
+        /// 配合 --hostname 可自定义主机名。
         #[arg(long)]
         unshare_uts: bool,
-        /// Cgroup 命名空间隔离
+        /// 隔离 cgroup 命名空间
+        ///
+        /// 子进程拥有独立的 cgroup 层次结构视图。
         #[arg(long)]
         unshare_cgroup: bool,
 
-        /// 软性 User 命名空间（内核不支持时静默回退）
+        /// 软性 user 命名空间（内核不支持时静默回退）
         #[arg(long)]
         unshare_user_try: bool,
-        /// 软性 Cgroup 命名空间（内核不支持时静默回退）
+        /// 软性 cgroup 命名空间（内核不支持时静默回退）
         #[arg(long)]
         unshare_cgroup_try: bool,
 
-        /// 在 user 命名空间中映射的 uid
+        /// 在 user 命名空间中映射的 uid（需 --unshare-user）
         #[arg(long)]
         uid: Option<u32>,
-        /// 在 user 命名空间中映射的 gid
+        /// 在 user 命名空间中映射的 gid（需 --unshare-user）
         #[arg(long)]
         gid: Option<u32>,
-        /// 在 UTS 命名空间中设置的 hostname
-        #[arg(long)]
+        /// 在 UTS 命名空间中设置 hostname（需 --unshare-uts）
+        #[arg(long, value_name = "NAME")]
         hostname: Option<String>,
 
-        /// 覆盖工作目录（而非默认的 cwd）
-        #[arg(long)]
+        /// 覆盖工作目录（而非继承父进程 cwd）
+        #[arg(long, value_name = "DIR")]
         chdir: Option<PathBuf>,
 
         /// 设置或覆盖环境变量，格式 KEY=VALUE（可重复）
-        #[arg(long, value_parser = parse_env_var)]
+        #[arg(long, value_name = "KEY=VALUE", value_parser = parse_env_var)]
         env: Vec<(String, String)>,
 
         /// 删除环境变量（可重复）
-        #[arg(long)]
+        #[arg(long, value_name = "KEY")]
         unsetenv: Vec<String>,
 
         /// 命令超时秒数（默认 30，不超过 --timeout-max）
         #[arg(long)]
         timeout: Option<u64>,
 
-        /// 命令超时上限秒数（仅 config 层，影响默认值上限）
+        /// 命令超时上限秒数（影响默认值上限）
         #[arg(long)]
         timeout_max: Option<u64>,
 
-        /// 清空环境变量
+        /// 清空环境变量（不从父进程继承任何环境变量）
         #[arg(long)]
         clearenv: bool,
 
-        /// 可写递归 bind mount。非 root 下需配合 --unshare-user
+        /// 可写递归 bind mount，格式 `--bind SRC DST`（可重复）
+        ///
+        /// 将宿主机路径 SRC 以可写方式挂载到容器内路径 DST。
+        /// 非 root 下需配合 --unshare-user。
         #[arg(long, value_names = ["SRC", "DST"], num_args = 2)]
         bind: Vec<String>,
 
-        /// 只读递归 bind mount。非 root 下需配合 --unshare-user
+        /// 只读递归 bind mount，格式 `--ro-bind SRC DST`（可重复）
+        ///
+        /// 将宿主机路径 SRC 以只读方式挂载到容器内路径 DST。
+        /// 非 root 下需配合 --unshare-user。
         #[arg(long, value_names = ["SRC", "DST"], num_args = 2)]
         ro_bind: Vec<String>,
 
-        /// 挂载 tmpfs。非 root 下需配合 --unshare-user
+        /// 挂载 tmpfs 到指定路径，格式 `--tmpfs DST`（可重复）
+        ///
+        /// 在容器内 DST 处创建一个空的内存文件系统。
+        /// 非 root 下需配合 --unshare-user。
         #[arg(long, value_names = ["DST"])]
         tmpfs: Vec<String>,
 
         /// 通过 USER_NOTIF 拦截指定 syscall 号（可重复）
-        #[arg(long)]
+        ///
+        /// 示例：--seccomp-deny-nr 165（拦截 mount）
+        ///        --seccomp-deny-nr 165 --seccomp-deny-nr 97（拦截 mount + unshare）
+        /// 常见 syscall 号（x86_64）：165=mount, 97=unshare, 173=ptrace
+        #[arg(long, value_name = "NR")]
         seccomp_deny_nr: Vec<u32>,
 
         /// 从文件描述符读取外部原始 cBPF filter（可重复）
-        #[arg(long)]
+        ///
+        /// 从指定 fd 读取原始 cBPF 字节码并追加到 seccomp filter 链。
+        /// 字节序必须匹配宿主机的 sock_filter 布局。
+        #[arg(long, value_name = "FD")]
         seccomp_filter_fd: Vec<std::os::unix::io::RawFd>,
 
-        /// 要执行的命令（trailing 参数；使用 -- 进行分隔）
+        /// 要执行的命令（使用 `--` 分隔选项与命令）
+        ///
+        /// 示例：sandbox-runtime run --landlock '/:ro' -- ls -la
+        ///        sandbox-runtime run --unshare-all -- sh -c 'echo hello'
+        /// 注意：本工具直接 execve 目标程序，不解释 shell 元字符 (>, |, &&)。
+        /// 需要 shell 语法时显式调用 sh -c。
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
 
-    /// 检查当前系统可用的沙箱机制
+    /// 检查当前系统可用的沙箱能力
+    ///
+    /// 显示 Landlock ABI 版本、seccomp 可用性、以及 6 种 namespace
+    /// 在当前内核上的支持情况。
     Check,
 
-    /// 启动 HTTP API 服务器（占位实现，尚未完成）
+    /// 启动 HTTP API 服务器（尚未实现）
     Serve {
-        /// 监听的端口
+        /// 服务器监听端口
         #[arg(long, default_value_t = 7878)]
         port: u16,
     },
@@ -278,9 +344,8 @@ fn cmd_run(
         anyhow::bail!("--hostname requires --unshare-uts or --unshare-all");
     }
 
-    let (effective_net, effective_network) = resolve_network_config(
-        unshare_net, share_net, allow_network, unshare_all,
-    );
+    let (effective_net, effective_network) =
+        resolve_network_config(unshare_net, share_net, allow_network, unshare_all);
 
     let mut config = build_config(
         landlock,
