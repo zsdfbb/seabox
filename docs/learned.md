@@ -39,3 +39,20 @@ PID namespace 在非 root 下需要 user ns 获取 CAP_SYS_ADMIN。由 CLI 层�
 组合。
 
 **测试**：N15（exit 42 → 42）验证退出码转发。N8（echo $$ = 2）验证业务进程不是 PID 1。
+
+---
+
+## `--ro-bind` 非 root 下 remount EPERM（2026-08-04）
+
+`ro_bind` 展开为两条 op：bind（`MS_BIND|MS_REC`）+ 只读 remount（`MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC`）。第二条在**非 root userns 下返回 EPERM**，导致 `--ro-bind` 对普通用户完全不可用（strace 实测 `si_uid=1000`）：
+
+```
+mount(src, target, NULL, MS_BIND|MS_REC) = 0                    # bind OK
+mount(NULL, target, NULL, MS_RDONLY|MS_REMOUNT|MS_BIND|MS_REC) = -1 EPERM   # remount ✗
+```
+
+**根因**：seabox 的 ro-remount 用 **NULL-source** 形式，内核在 userns 里拒绝这条路径；util-linux `mount -o remount,bind,ro`（**重新传 source/fstype/data**）在同样环境下 3/3 成功。裸 C 的 NULL-source remount 即使在 `unshare -rm`（ns-root）下也 EPERM，确认是 mount(2) 调用形式问题而非权限。
+
+**修复方向**：父进程 fork 前从 `/proc/self/mountinfo` 预计算原始 mount 的 source/type/data，remount 时带上（对齐 util-linux 形式）。
+
+**教训**：非 root 的只读保护应走 **Landlock**（`--landlock '/:ro'`），不依赖 mount；`--ro-bind` 实际仅 root 或 userns 内自建 fs（tmpfs）可用。bind mount 本身（`--bind`）非 root 可用、双向可见，无此问题。

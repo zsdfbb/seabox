@@ -222,3 +222,7 @@ echo "$out"
 ## 经验教训
 
 跨会话累积踩坑记录，详见 [docs/learned.md](docs/learned.md)。
+
+## 外部引用
+
+- 优先在 ${HOME}/OpenSrc 下查看第三方项目源码。

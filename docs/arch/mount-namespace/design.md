@@ -265,6 +265,16 @@ pub unsafe fn do_mounts(ops: *const RawMountOp, count: usize) -> i32;
 
 ---
 
+## 8.5 已知限制：`--ro-bind` 非 root 不可用（2026-08-04 增补）
+
+`ro_bind` 的只读 remount 用 **NULL-source** 的 `mount(2)` 形式（`MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC`），内核在 user namespace 里对该路径返回 **EPERM**（strace 实测，非 root uid 下）。`--bind` 本身正常（双向可见）；`--ro-bind` 实际仅 root 或 userns 内自建 fs（tmpfs）可用。
+
+**影响**：非 root 的只读保护应走 **Landlock**（`--landlock '/:ro'`），不依赖 mount——与本文"Landlock 声明式零挂载为主、mount ns 为容器式层"的设计定位一致。
+
+**修复方向**：父进程 fork 前从 `/proc/self/mountinfo` 预计算原始 mount 的 source/type/data，remount 时带上（对齐 util-linux `mount -o remount,bind,ro` 形式，后者在 userns 内实测 3/3 成功）。详见 `docs/learned.md`。
+
+---
+
 ## 9. 代码量估算
 
 | 文件 | 新增行数 |
