@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 use seabox::config::{parse_landlock_spec, NamespacesConfig, SandboxConfig};
 use seabox::{CommandSpec, ExitReason, Sandbox};
@@ -16,6 +16,51 @@ fn parse_env_var(s: &str) -> Result<(String, String), String> {
         return Err("invalid --env value: KEY must not be empty".into());
     }
     Ok((key.to_owned(), val.to_owned()))
+}
+
+/// 一条挂载动作，按 CLI 出现顺序应用。
+///
+/// `--bind` / `--ro-bind` / `--tmpfs` 在命令行上可以任意交错，
+/// 且覆盖语义依赖顺序（先挂基座再挂叠加层）。clap derive 会把三个 flag
+/// 收进三个独立 Vec，丢失跨 flag 的全局顺序，因此用 `indices_of` 恢复。
+#[derive(Debug)]
+enum MountAction {
+    Bind(String, String),
+    RoBind(String, String),
+    Tmpfs(String),
+}
+
+/// 按 CLI 参数出现顺序合并 `--bind` / `--ro-bind` / `--tmpfs`。
+///
+/// 参照 bwrap：挂载按命令行顺序处理，后出现的挂载点叠加在先前之上。
+fn collect_mount_actions(
+    matches: &clap::ArgMatches,
+    bind: &[String],
+    ro_bind: &[String],
+    tmpfs: &[String],
+) -> Vec<MountAction> {
+    let mut actions: Vec<(usize, MountAction)> = Vec::new();
+    if let Some(indices) = matches.indices_of("bind") {
+        for (i, pair) in indices.zip(bind.chunks(2)) {
+            if pair.len() == 2 {
+                actions.push((i, MountAction::Bind(pair[0].clone(), pair[1].clone())));
+            }
+        }
+    }
+    if let Some(indices) = matches.indices_of("ro_bind") {
+        for (i, pair) in indices.zip(ro_bind.chunks(2)) {
+            if pair.len() == 2 {
+                actions.push((i, MountAction::RoBind(pair[0].clone(), pair[1].clone())));
+            }
+        }
+    }
+    if let Some(indices) = matches.indices_of("tmpfs") {
+        for (i, t) in indices.zip(tmpfs) {
+            actions.push((i, MountAction::Tmpfs(t.clone())));
+        }
+    }
+    actions.sort_by_key(|(i, _)| *i);
+    actions.into_iter().map(|(_, a)| a).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +264,10 @@ enum Cli {
 // ---------------------------------------------------------------------------
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // 用 get_matches + from_arg_matches 两步，以便保留挂载 flag 的全局出现顺序
+    // （collect_mount_actions 需要 matches.indices_of）。
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
 
     match cli {
         Cli::Run {
@@ -252,37 +300,42 @@ fn main() -> anyhow::Result<()> {
             seccomp_filter_fd,
             timeout,
             timeout_max,
-        } => cmd_run(
-            landlock,
-            allow_network,
-            share_net,
-            debug,
-            command,
-            unshare_all,
-            unshare_user,
-            unshare_ipc,
-            unshare_mnt,
-            unshare_pid,
-            unshare_net,
-            unshare_uts,
-            unshare_cgroup,
-            unshare_user_try,
-            unshare_cgroup_try,
-            uid,
-            gid,
-            hostname,
-            chdir,
-            env_vars,
-            unsetenv,
-            clearenv,
-            bind,
-            ro_bind,
-            tmpfs,
-            seccomp_deny_nr,
-            seccomp_filter_fd,
-            timeout,
-            timeout_max,
-        ),
+        } => {
+            // bind/ro_bind/tmpfs 属于 Run 子命令，需取子命令的 ArgMatches。
+            let run_matches = matches
+                .subcommand_matches("run")
+                .expect("matched Run subcommand");
+            let mount_actions = collect_mount_actions(run_matches, bind, ro_bind, tmpfs);
+            cmd_run(
+                landlock,
+                allow_network,
+                share_net,
+                debug,
+                command,
+                unshare_all,
+                unshare_user,
+                unshare_ipc,
+                unshare_mnt,
+                unshare_pid,
+                unshare_net,
+                unshare_uts,
+                unshare_cgroup,
+                unshare_user_try,
+                unshare_cgroup_try,
+                uid,
+                gid,
+                hostname,
+                chdir,
+                env_vars,
+                unsetenv,
+                clearenv,
+                mount_actions,
+                seccomp_deny_nr,
+                seccomp_filter_fd,
+                timeout,
+                timeout_max,
+            )
+        }
         Cli::Check => cmd_check(),
         Cli::Serve { port } => cmd_serve(port),
     }
@@ -317,9 +370,7 @@ fn cmd_run(
     env_vars: Vec<(String, String)>,
     unsetenv: Vec<String>,
     clearenv: bool,
-    bind: &[String],
-    ro_bind: &[String],
-    tmpfs: &[String],
+    mount_actions: Vec<MountAction>,
     seccomp_deny_nrs: Vec<u32>,
     seccomp_filter_fds: Vec<std::os::unix::io::RawFd>,
     timeout: Option<u64>,
@@ -367,19 +418,15 @@ fn cmd_run(
         timeout_max,
     )?;
 
-    // --bind / --ro-bind / --tmpfs: 添加 mount 规格
-    for pair in bind.chunks(2) {
-        if pair.len() == 2 {
-            config = config.with_bind(&pair[0], &pair[1]);
-        }
-    }
-    for pair in ro_bind.chunks(2) {
-        if pair.len() == 2 {
-            config = config.with_ro_bind(&pair[0], &pair[1]);
-        }
-    }
-    for target in tmpfs {
-        config = config.with_tmpfs(target);
+    // --bind / --ro-bind / --tmpfs: 按 CLI 顺序添加 mount 规格。
+    // 覆盖语义依赖顺序：先挂基座（如 --ro-bind），再挂叠加层
+    // （如 --bind 到基座内部的可写目录）。
+    for action in mount_actions {
+        config = match action {
+            MountAction::Bind(src, dst) => config.with_bind(&src, &dst),
+            MountAction::RoBind(src, dst) => config.with_ro_bind(&src, &dst),
+            MountAction::Tmpfs(dst) => config.with_tmpfs(&dst),
+        };
     }
 
     // --seccomp-deny-nr: 添加 syscall 号到配置

@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(spec.source, Some("/host/src".into()));
         assert_eq!(spec.target, "/container/dst");
         assert_eq!(spec.fstype, "none");
-        assert_eq!(spec.flags, (MS_BIND | MS_REC) as u64);
+        assert_eq!(spec.flags, MS_BIND | MS_REC);
         assert!(!spec.readonly);
     }
 
@@ -554,6 +554,6 @@ mod tests {
         assert!(spec.source.is_none());
         assert_eq!(spec.target, "/mnt/tmp");
         assert_eq!(spec.fstype, "tmpfs");
-        assert_eq!(spec.flags, (MS_NOSUID | MS_NODEV) as u64);
+        assert_eq!(spec.flags, MS_NOSUID | MS_NODEV);
     }
 }

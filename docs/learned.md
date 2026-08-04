@@ -42,17 +42,21 @@ PID namespace 在非 root 下需要 user ns 获取 CAP_SYS_ADMIN。由 CLI 层�
 
 ---
 
-## `--ro-bind` 非 root 下 remount EPERM（2026-08-04）
+## `--ro-bind` 非 root 下 remount EPERM（2026-08-04，已修复）
 
-`ro_bind` 展开为两条 op：bind（`MS_BIND|MS_REC`）+ 只读 remount（`MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC`）。第二条在**非 root userns 下返回 EPERM**，导致 `--ro-bind` 对普通用户完全不可用（strace 实测 `si_uid=1000`）：
+`ro_bind` 展开为两条 op：bind（`MS_BIND|MS_REC`）+ 只读 remount（`MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC`）。第二条在**非 root userns 下返回 EPERM**，导致 `--ro-bind` 对普通用户不可用（strace 实测 `si_uid=1000`）：
 
 ```
-mount(src, target, NULL, MS_BIND|MS_REC) = 0                    # bind OK
-mount(NULL, target, NULL, MS_RDONLY|MS_REMOUNT|MS_BIND|MS_REC) = -1 EPERM   # remount ✗
+mount(src, target, NULL, MS_BIND|MS_REC) = 0                                    # bind OK
+mount(NULL, target, NULL, MS_RDONLY|MS_REMOUNT|MS_BIND|MS_REC) = -1 EPERM        # remount ✗
 ```
 
-**根因**：seabox 的 ro-remount 用 **NULL-source** 形式，内核在 userns 里拒绝这条路径；util-linux `mount -o remount,bind,ro`（**重新传 source/fstype/data**）在同样环境下 3/3 成功。裸 C 的 NULL-source remount 即使在 `unshare -rm`（ns-root）下也 EPERM，确认是 mount(2) 调用形式问题而非权限。
+**根因**：userns 里内核把源 superblock 的 `MS_NOSUID`/`MS_NODEV`/`MS_NOEXEC`/`MS_RDONLY`/atime 模式**锁定**为不可移除。remount 不带这些 flag = 试图移除锁定 flag → EPERM。与"是否传 source"无关——裸 C 传 source 而不带锁定额外 flags 同样 EPERM（`unshare -rm` 下实测）。`/tmp`（tmpfs nosuid,nodev）必炸；`/etc`（ext4 rw,relatime 无锁定）不炸。
 
-**修复方向**：父进程 fork 前从 `/proc/self/mountinfo` 预计算原始 mount 的 source/type/data，remount 时带上（对齐 util-linux 形式）。
+**修复**：父进程从 `/proc/self/mountinfo` 读源挂载的 opts，映射为 MS_* flags（`source_mount_flags`），remount 时 OR 进 flags。最小可用形式是 **NULL source + `MS_REMOUNT|MS_BIND|MS_RDONLY|MS_NOSUID|MS_NODEV`**（不用传 source/fstype/data）。
 
-**教训**：非 root 的只读保护应走 **Landlock**（`--landlock '/:ro'`），不依赖 mount；`--ro-bind` 实际仅 root 或 userns 内自建 fs（tmpfs）可用。bind mount 本身（`--bind`）非 root 可用、双向可见，无此问题。
+**连带发现（另一 bug）**：`main.rs` 恒先处理 `--bind` 再 `--ro-bind`，与 CLI 顺序无关。`--ro-bind src demo --bind out demo/build` 会先挂 build、再挂 demo，导致 build 被后挂的基座**埋住**（写落到只读 src）。修复：`indices_of` 按 CLI 顺序合并 `--bind`/`--ro-bind`/`--tmpfs`（bwrap 语义）。
+
+**测试**：`mount_ro_bind_readonly_nonroot`（EPERM 回归）、`mount_ro_bind_with_writable_overlay`（顺序回归）。
+
+**教训**：非 root 的只读保护首选 **Landlock**（`--landlock '/:ro'`）；`--ro-bind` 修复后非 root 可用，但叠加可写子目录必须把基座写在前面。

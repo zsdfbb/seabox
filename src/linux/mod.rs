@@ -474,6 +474,69 @@ fn resolve_exec_path(program: &str, spec_env: &HashMap<String, String>) -> CStri
 /// 调用方必须保证返回的 `cstrings` Vec 在 `enter_child` 调用期间存活。
 /// `prepare_mount_ops` 预分配了足够容量避免后续 reallocation，
 /// 因此返回的 ops 指针在 `cstrings` 生命周期内稳定有效。
+/// 解析 `/proc/self/mountinfo` 的 opts 字段（如 `rw,nosuid,nodev,relatime`）为
+/// `mount(2)` 的 MS_* flags。无法识别的选项忽略。
+///
+/// 只映射 userns 里会被内核**锁定**的 flags（NOSUID/NODEV/NOEXEC/RO/ATIME 模式）。
+/// `--ro-bind` 的只读 remount 必须保留源挂载的锁定 flags，否则非 root 下
+/// remount 返回 EPERM（见 docs/learned.md 与 docs/arch/mount-namespace/design.md §8.5）。
+fn parse_mount_opts_flags(opts: &str) -> u64 {
+    use mount::{
+        MS_NOATIME, MS_NODEV, MS_NODIRATIME, MS_NOEXEC, MS_NOSUID, MS_RDONLY, MS_RELATIME,
+        MS_STRICTATIME,
+    };
+    let mut flags: u64 = 0;
+    for opt in opts.split(',') {
+        match opt {
+            "ro" => flags |= MS_RDONLY,
+            "nosuid" => flags |= MS_NOSUID,
+            "nodev" => flags |= MS_NODEV,
+            "noexec" => flags |= MS_NOEXEC,
+            "noatime" => flags |= MS_NOATIME,
+            "nodiratime" => flags |= MS_NODIRATIME,
+            "relatime" => flags |= MS_RELATIME,
+            "strictatime" => flags |= MS_STRICTATIME,
+            _ => {}
+        }
+    }
+    flags
+}
+
+/// 从 `/proc/self/mountinfo` 找出 `path` 所在挂载的 MS_* flags。
+///
+/// 取 mountpoint 是 path 的路径前缀（且边界正确）的**最深**挂载行，解析其 opts。
+/// 找不到时返回 0（保持旧行为，root 场景仍可用）。
+fn source_mount_flags(path: &std::path::Path) -> u64 {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let target = canonical.to_string_lossy();
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return 0;
+    };
+    let mut best_len: usize = 0;
+    let mut best_opts: &str = "";
+    for line in info.lines() {
+        let mut it = line.split_whitespace();
+        it.next(); // id
+        it.next(); // parent
+        it.next(); // maj:min
+        it.next(); // root
+        let Some(mp) = it.next() else { continue };
+        let Some(opts) = it.next() else { continue };
+        let is_prefix = if mp == "/" {
+            true
+        } else if let Some(rest) = target.strip_prefix(mp) {
+            rest.starts_with('/')
+        } else {
+            false
+        };
+        if is_prefix && mp.len() > best_len {
+            best_len = mp.len();
+            best_opts = opts;
+        }
+    }
+    parse_mount_opts_flags(best_opts)
+}
+
 fn prepare_mount_ops(
     config: &MountConfig,
 ) -> anyhow::Result<(Vec<mount::RawMountOp>, Vec<CString>)> {
@@ -530,11 +593,15 @@ fn prepare_mount_ops(
                         data: std::ptr::null(),
                     });
                     // 第二条: remount ro（bind + remount + rdonly + rec）
+                    // 必须带上源挂载已有的 flags（nosuid/nodev/noexec/atime 等）：
+                    // userns 里这些 flag 被内核锁定，remount 不带它们 = 尝试移除 → EPERM。
+                    let existing_flags = source_mount_flags(std::path::Path::new(src));
                     ops.push(mount::RawMountOp {
                         source: std::ptr::null(),
                         target: target_ptr,
                         fstype: std::ptr::null(),
-                        flags: (mount::MS_BIND
+                        flags: (existing_flags
+                            | mount::MS_BIND
                             | mount::MS_REMOUNT
                             | mount::MS_RDONLY
                             | mount::MS_REC) as libc::c_ulong,
@@ -765,4 +832,38 @@ fn spawn_user_notif_worker(
     Ok(UserNotifHandle {
         worker: Some(worker),
     })
+}
+
+// ---------------------------------------------------------------------------
+// 单元测试
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mount_opts_flags;
+    use crate::linux::mount;
+
+    #[test]
+    fn parse_opts_flags_common() {
+        let f = parse_mount_opts_flags("rw,nosuid,nodev,relatime");
+        assert_ne!(f & mount::MS_NOSUID, 0, "nosuid mapped");
+        assert_ne!(f & mount::MS_NODEV, 0, "nodev mapped");
+        assert_ne!(f & mount::MS_RELATIME, 0, "relatime mapped");
+        assert_eq!(f & mount::MS_RDONLY, 0, "rw not ro");
+    }
+
+    #[test]
+    fn parse_opts_flags_ro_and_atime() {
+        let f = parse_mount_opts_flags("ro,noexec,noatime,nodiratime");
+        assert_ne!(f & mount::MS_RDONLY, 0);
+        assert_ne!(f & mount::MS_NOEXEC, 0);
+        assert_ne!(f & mount::MS_NOATIME, 0);
+        assert_ne!(f & mount::MS_NODIRATIME, 0);
+    }
+
+    #[test]
+    fn parse_opts_flags_unknown_ignored() {
+        let f = parse_mount_opts_flags("rw,usrquota,grpquota");
+        assert_eq!(f, 0);
+    }
 }

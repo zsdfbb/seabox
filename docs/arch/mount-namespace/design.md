@@ -265,13 +265,13 @@ pub unsafe fn do_mounts(ops: *const RawMountOp, count: usize) -> i32;
 
 ---
 
-## 8.5 已知限制：`--ro-bind` 非 root 不可用（2026-08-04 增补）
+## 8.5 已知限制与修复：`--ro-bind` 非 root 下 remount EPERM（2026-08-04，已修复）
 
-`ro_bind` 的只读 remount 用 **NULL-source** 的 `mount(2)` 形式（`MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC`），内核在 user namespace 里对该路径返回 **EPERM**（strace 实测，非 root uid 下）。`--bind` 本身正常（双向可见）；`--ro-bind` 实际仅 root 或 userns 内自建 fs（tmpfs）可用。
+`ro_bind` 的只读 remount 用 NULL-source 的 `mount(2)` 形式，内核在 userns 里对**不带源 superblock 锁定 flags**（nosuid/nodev/noexec/ro/atime）的 remount 返回 **EPERM**（strace 实测）。`/tmp`（tmpfs nosuid,nodev）必炸；`--bind` 本身无此问题。
 
-**影响**：非 root 的只读保护应走 **Landlock**（`--landlock '/:ro'`），不依赖 mount——与本文"Landlock 声明式零挂载为主、mount ns 为容器式层"的设计定位一致。
+**修复**：父进程 `source_mount_flags()` 从 `/proc/self/mountinfo` 读源挂载 opts 映射为 MS_* flags，remount 时 OR 进 flags。另修 `main.rs` 挂载 CLI 顺序 bug（`indices_of` 按命令行顺序合并 `--bind`/`--ro-bind`/`--tmpfs`，否则叠加可写子目录会被后挂的基座埋住）。
 
-**修复方向**：父进程 fork 前从 `/proc/self/mountinfo` 预计算原始 mount 的 source/type/data，remount 时带上（对齐 util-linux `mount -o remount,bind,ro` 形式，后者在 userns 内实测 3/3 成功）。详见 `docs/learned.md`。
+**现状**：非 root 下 `--ro-bind` 可用（含"只读基座 + 可写叠加子目录"模式）。Landlock 仍是非 root 只读保护的首选（零挂载），`--ro-bind` 是容器式层。详见 `docs/learned.md`。
 
 ---
 

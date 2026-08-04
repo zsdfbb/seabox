@@ -31,6 +31,21 @@ pub const MS_NOSUID: libc::c_ulong = 2;
 /// `mount(2)` flag: 禁止访问块设备。
 pub const MS_NODEV: libc::c_ulong = 4;
 
+/// `mount(2)` flag: 禁止执行程序。
+pub const MS_NOEXEC: libc::c_ulong = 8;
+
+/// `mount(2)` flag: 禁止更新访问时间。
+pub const MS_NOATIME: libc::c_ulong = 1024; // 0x400
+
+/// `mount(2)` flag: 禁止更新目录访问时间。
+pub const MS_NODIRATIME: libc::c_ulong = 2048; // 0x800
+
+/// `mount(2)` flag: 使用相对访问时间（2.6.30+ 默认）。
+pub const MS_RELATIME: libc::c_ulong = 1 << 21; // 0x200000
+
+/// `mount(2)` flag: 严格访问时间。
+pub const MS_STRICTATIME: libc::c_ulong = 1 << 24; // 0x1000000
+
 /// `mount(2)` flag: 使挂载为私有（不接收也不传播 mount 事件）。
 pub const MS_PRIVATE: libc::c_ulong = 1 << 18; // 0x40000
 

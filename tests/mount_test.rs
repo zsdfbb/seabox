@@ -274,6 +274,133 @@ fn mount_ro_bind_readonly() {
 }
 
 // ---------------------------------------------------------------------------
+// M3b: --ro-bind 非 root userns 下可读不可写（EPERM 回归）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mount_ro_bind_readonly_nonroot() {
+    if skip_if_no_user_ns() || skip_if_no_mnt_ns() {
+        return;
+    }
+
+    // 与 M3 相同，但明确在非 root（--unshare-user 同 uid 映射）下验证。
+    // 回归 docs/learned.md 记录的 ro-remount EPERM：remount 必须带上源挂载的
+    // nosuid/nodev 等锁定 flags，否则非 root 下 mount(2) 返回 EPERM。
+    // /tmp 通常是 tmpfs nosuid,nodev，正是会触发该 bug 的场景。
+    let src = create_temp_dir("ro-nr-src");
+    let dst = create_temp_dir("ro-nr-dst");
+    std::fs::write(src.join("f.txt"), "data").expect("write");
+
+    let src_str = src.to_str().expect("utf-8");
+    let dst_str = dst.to_str().expect("utf-8");
+
+    // 读成功
+    let out = run_cli(&[
+        "run",
+        "--unshare-user",
+        "--unshare-mnt",
+        "--ro-bind",
+        src_str,
+        dst_str,
+        "--",
+        "cat",
+        &format!("{dst_str}/f.txt"),
+    ]);
+    assert_eq!(out.exit_code, Some(0), "ro-bind read: {:?}", out);
+
+    // 写被拒
+    let out = run_cli(&[
+        "run",
+        "--unshare-user",
+        "--unshare-mnt",
+        "--ro-bind",
+        src_str,
+        dst_str,
+        "--",
+        "touch",
+        &format!("{dst_str}/newfile"),
+    ]);
+    assert_ne!(
+        out.exit_code,
+        Some(0),
+        "ro-bind write must be denied: {:?}",
+        out
+    );
+
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&dst);
+}
+
+// ---------------------------------------------------------------------------
+// M3c: --ro-bind 基座 + --bind 叠加可写子目录（只读源码 + 可写构建产物）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mount_ro_bind_with_writable_overlay() {
+    if skip_if_no_user_ns() || skip_if_no_mnt_ns() {
+        return;
+    }
+
+    let src = create_temp_dir("ro-ov-src");
+    let dst = create_temp_dir("ro-ov-dst");
+    let out = create_temp_dir("ro-ov-out");
+
+    std::fs::write(src.join("readme.txt"), "source").expect("write");
+    // 叠加子目录需在基座源树中（ro-bind 后 target 解析进基座）与宿主侧（预检）都存在
+    let _ = std::fs::create_dir_all(src.join("build"));
+    let _ = std::fs::create_dir_all(dst.join("build"));
+
+    let src_str = src.to_str().expect("utf-8");
+    let dst_str = dst.to_str().expect("utf-8");
+    let out_str = out.to_str().expect("utf-8");
+
+    // --ro-bind 基座在前、--bind 叠加可写子目录在后（回归 CLI 挂载顺序 bug：
+    // 之前 main.rs 恒先处理 --bind，导致叠加层被后挂的基座埋住）
+    let out_r = run_cli(&[
+        "run",
+        "--unshare-user",
+        "--unshare-mnt",
+        "--ro-bind",
+        src_str,
+        dst_str,
+        "--bind",
+        out_str,
+        &format!("{dst_str}/build"),
+        "--",
+        "sh",
+        "-c",
+        &format!("echo v2 > {dst_str}/build/artifact.txt && echo written"),
+    ]);
+    assert_eq!(
+        out_r.exit_code,
+        Some(0),
+        "ro base + rw overlay: {:?}",
+        out_r
+    );
+    assert!(
+        out_r.stdout.contains("written"),
+        "overlay subdir writable: {:?}",
+        out_r
+    );
+
+    // 宿主侧：基座源未变，叠加产物已写入宿主 out 目录
+    assert_eq!(
+        std::fs::read_to_string(src.join("readme.txt")).unwrap(),
+        "source",
+        "base source must remain unchanged"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("artifact.txt")).unwrap(),
+        "v2",
+        "overlay artifact should reach host out dir"
+    );
+
+    let _ = std::fs::remove_dir_all(&src);
+    let _ = std::fs::remove_dir_all(&dst);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+// ---------------------------------------------------------------------------
 // M4: 仅 --unshare-mnt 无 mount ops，进程正常运行
 // ---------------------------------------------------------------------------
 
