@@ -34,6 +34,7 @@
 //!    `Arc<Mutex<Option<(nr, arch)>>>`，`execute` 返回后 `classify_exit`
 //!    读取该值，在 exit_code=0 的情况下仍然把命令归类为 `Denied { Seccomp }`。
 
+pub mod caps;
 pub mod child_setup;
 pub mod landlock;
 pub mod mount;
@@ -153,11 +154,11 @@ impl SandboxImpl for LinuxSandbox {
 
         // PID ns 在非 root 下需要 user ns 来获取 CAP_SYS_ADMIN。
         // 这里规范化 so 无论 CLI 还是 crate API 路径都覆盖。
-        let effective_user = if ns.pid && !ns.user && unsafe { libc::geteuid() } != 0 {
-            true
-        } else {
-            ns.user
-        };
+        let euid = unsafe { libc::geteuid() };
+        // --cap-add 需要在 userns 内保留/获取 caps，自动叠加 user ns（root 也触发，D2）。
+        // 仅 cap-add 触发：cap-drop 无回灌宿主命名空间风险，单独使用不强制 userns。
+        let has_cap_add = has_cap_add(&self.config.capabilities.ops);
+        let effective_user = ns.user || (ns.pid && euid != 0) || has_cap_add;
 
         // 常规 namespace（不含 PID，PID 通过 double-fork 单独处理）
         let ns_ops: Vec<child_setup::NsOp> = {
@@ -245,6 +246,18 @@ impl SandboxImpl for LinuxSandbox {
         let mount_ops_len = mount_ops.len();
         let do_private = has_mounts;
 
+        // ── 预计算 capability 计划（fork 前、父进程侧解析）──
+        let is_root = unsafe { libc::geteuid() } == 0;
+        // ns_root：userns 内子进程映射后的 uid 是否为 0（= sandbox_uid，
+        // 与下方 uid_map 内容 `{sandbox_uid} {real_uid} 1` 一致，见
+        // child_setup::enter_child 的 map 写入）。必须按 sandbox_uid 判定，
+        // 而不是宿主 euid：host-root 显式 `--uid <非0>` 时子进程在 ns 内
+        // 是非 root（sandbox_uid 非 0），跨 exec 需 ambient 保留 cap；
+        // `is_root` 只表示宿主 euid，不能单独用于判定 ns 内 uid。
+        let ns_root = ns_root_active(effective_user, ns.uid, real_uid);
+        let caps_plan =
+            caps::resolve_caps(&self.config.capabilities, is_root, effective_user, ns_root);
+
         // ── 步骤 5：raw fork + 手动 setup ──────────────────────
         let pid = unsafe { libc::fork() };
         if pid < 0 {
@@ -299,6 +312,8 @@ impl SandboxImpl for LinuxSandbox {
                     mount_ops_ptr,
                     mount_ops_len,
                     do_private,
+                    caps_plan.requested,
+                    caps_plan.flags,
                 );
             }
         }
@@ -461,6 +476,30 @@ fn resolve_exec_path(program: &str, spec_env: &HashMap<String, String>) -> CStri
         }
     }
     CString::new(program).unwrap_or_default()
+}
+
+/// 判断 capability ops 中是否存在 cap-add（`--cap-add` / `--cap-add ALL`）。
+///
+/// 仅 cap-add 需要自动叠加 user namespace（D2：防 cap 回灌宿主命名空间）；
+/// cap-drop 无回灌风险，单独使用不应强制 userns。空 ops 也不触发。
+fn has_cap_add(ops: &[crate::config::CapOp]) -> bool {
+    ops.iter().any(|op| {
+        matches!(
+            op,
+            crate::config::CapOp::Add(_) | crate::config::CapOp::AddAll
+        )
+    })
+}
+
+/// 判定 userns 内子进程映射后的 uid 是否为 0（ns-root）。
+///
+/// 决定跨 exec 是否需 ambient 保留 cap：ns 内非 root 时 `resolve_caps`
+/// 会置 `CAP_F_NEED_AMBIENT`。判定依据是 **sandbox uid**（`ns.uid.unwrap_or(real_uid)`，
+/// 与 uid_map 内容 `{sandbox_uid} {real_uid} 1` 一致），而不是宿主 euid——
+/// host-root 显式 `--uid <非0>` 时子进程在 ns 内是非 root，宿主 root 状态
+/// 不改变这一点。`effective_user` 为 false（无 userns）时恒为 false。
+fn ns_root_active(effective_user: bool, ns_uid: Option<u32>, real_uid: u32) -> bool {
+    effective_user && ns_uid.unwrap_or(real_uid) == 0
 }
 
 /// fork 前将 [`MountConfig`] 中的规格预编码为子进程可见的
@@ -840,8 +879,51 @@ fn spawn_user_notif_worker(
 
 #[cfg(test)]
 mod tests {
+    use super::has_cap_add;
+    use super::ns_root_active;
     use super::parse_mount_opts_flags;
     use crate::linux::mount;
+
+    /// Bug 1 回归：has_cap_add 只认 cap-add，`--cap-drop`/`--cap-drop ALL` 单独使用
+    /// 不应触发自动叠加 userns（D2：cap-drop 无回灌宿主命名空间风险）。
+    #[test]
+    fn has_cap_add_only_for_add_ops() {
+        use crate::config::{CapOp, Capability};
+        // 仅 Drop / 空 ops → 不触发 userns。
+        assert!(!has_cap_add(&[]));
+        assert!(!has_cap_add(&[CapOp::Drop(Capability::CHOWN)]));
+        assert!(!has_cap_add(&[CapOp::DropAll]));
+        assert!(!has_cap_add(&[
+            CapOp::Drop(Capability::CHOWN),
+            CapOp::Drop(Capability::NET_RAW),
+        ]));
+        // 含 Add → 触发。
+        assert!(has_cap_add(&[CapOp::Add(Capability::CHOWN)]));
+        assert!(has_cap_add(&[CapOp::AddAll]));
+        assert!(has_cap_add(&[
+            CapOp::Drop(Capability::CHOWN),
+            CapOp::Add(Capability::NET_RAW),
+        ]));
+    }
+
+    /// Bug 3 回归：ns_root 必须按 sandbox uid（`ns.uid.unwrap_or(real_uid)`）判定，
+    /// 而不是宿主 euid（`is_root`）。host-root + `--uid <非0>` 时子进程在 userns 内
+    /// 是非 root，跨 exec 需 ambient 保留 cap。
+    #[test]
+    fn ns_root_judged_by_sandbox_uid() {
+        // host-root 无 --uid：sandbox_uid = real_uid = 0 → ns-root ✓
+        assert!(ns_root_active(true, None, 0));
+        // host-root --uid 1000：sandbox_uid = 1000 → 非 ns-root（需 ambient）✓
+        assert!(!ns_root_active(true, Some(1000), 0));
+        // 非 root --uid 0：sandbox_uid = 0 → ns-root ✓
+        assert!(ns_root_active(true, Some(0), 1000));
+        // 非 root 无 --uid：sandbox_uid = real_uid（非 0）→ 非 ns-root ✓
+        assert!(!ns_root_active(true, None, 1000));
+        // 无 userns（effective_user=false）→ 恒非 ns-root。
+        assert!(!ns_root_active(false, None, 0));
+        assert!(!ns_root_active(false, Some(0), 0));
+        assert!(!ns_root_active(false, Some(1000), 1000));
+    }
 
     #[test]
     fn parse_opts_flags_common() {

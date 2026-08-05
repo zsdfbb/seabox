@@ -12,7 +12,7 @@ use std::time::Duration;
 
 pub mod config;
 
-pub use config::SandboxConfig;
+pub use config::{CapOp, Capability, CapabilityConfig, SandboxConfig};
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -401,7 +401,10 @@ impl Sandbox {
     /// 非 root 下 `pid` 隐式启用 `user` 命名空间。
     pub fn from_config(config: config::SandboxConfig) -> anyhow::Result<Self> {
         let ns = &config.namespaces;
-        let effective_user = ns.pid && !ns.user && unsafe { libc::geteuid() } != 0;
+        // D2：--cap-add 需要 userns 承载新 cap（防 cap 回灌宿主命名空间），
+        // 与 pid/net 自动叠加 userns 的模式一致。
+        let effective_user = (ns.pid && !ns.user && unsafe { libc::geteuid() } != 0)
+            || config.capabilities.has_add();
         let config = if effective_user {
             let mut c = config;
             c.namespaces.user = true;

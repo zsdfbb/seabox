@@ -32,6 +32,8 @@ pub struct SandboxConfig {
     pub seccomp_deny_nrs: Vec<u32>,
     /// 外部原始 cBPF 字节（`--seccomp-filter-fd`，从 fd 读取后存入）。
     pub seccomp_filter_bytes: Vec<Vec<u8>>,
+    /// capability 权限操作（`--cap-add`/`--cap-drop`/`--cap-inherit`）。
+    pub capabilities: CapabilityConfig,
 }
 
 impl Default for SandboxConfig {
@@ -45,6 +47,7 @@ impl Default for SandboxConfig {
             timeout_max_secs: 300,
             seccomp_deny_nrs: vec![],
             seccomp_filter_bytes: vec![],
+            capabilities: CapabilityConfig::default(),
         }
     }
 }
@@ -261,6 +264,42 @@ impl SandboxConfig {
         self
     }
 
+    /// 追加一条 cap 添加操作（等价于 `--cap-add name`）。
+    ///
+    /// 名称解析失败时返回错误（仿 [`Self::with_landlock`]）。
+    pub fn with_cap_add(mut self, name: &str) -> anyhow::Result<Self> {
+        self.capabilities.ops.push(CapOp::from_cli(name, true)?);
+        Ok(self)
+    }
+
+    /// 追加一条 cap 丢弃操作（等价于 `--cap-drop name`）。
+    ///
+    /// 名称解析失败时返回错误。
+    pub fn with_cap_drop(mut self, name: &str) -> anyhow::Result<Self> {
+        self.capabilities.ops.push(CapOp::from_cli(name, false)?);
+        Ok(self)
+    }
+
+    /// 追加"添加全部 cap"操作（等价于 `--cap-add ALL`）。
+    pub fn with_cap_add_all(mut self) -> Self {
+        self.capabilities.ops.push(CapOp::AddAll);
+        self
+    }
+
+    /// 追加"丢弃全部 cap"操作（等价于 `--cap-drop ALL`）。
+    pub fn with_cap_drop_all(mut self) -> Self {
+        self.capabilities.ops.push(CapOp::DropAll);
+        self
+    }
+
+    /// 设置是否继承当前进程 effective caps 作为起点（等价于 `--cap-inherit`）。
+    ///
+    /// 默认 `false`：从空集开始，仅显式添加的 cap 会进入。
+    pub fn with_cap_inherit(mut self, inherit: bool) -> Self {
+        self.capabilities.inherit_base = inherit;
+        self
+    }
+
     /// 创建沙箱实例（返回 [`crate::Sandbox`]）。
     pub fn into_sandbox(self) -> anyhow::Result<crate::Sandbox> {
         crate::Sandbox::from_config(self)
@@ -301,6 +340,186 @@ pub struct NamespacesConfig {
     pub gid: Option<u32>,
     /// 在 UTS 命名空间中设置的 hostname（仅在 `uts` 生效时使用）。
     pub hostname: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Capability
+// ---------------------------------------------------------------------------
+
+/// Linux capability 编号（`u16` 新类型）。
+///
+/// 编号是稳定 ABI 常量（`uapi/linux/capability.h`），config 层不依赖 libc，
+/// 与 `MS_*` mount 常量并列，属纯数据层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Capability(u16);
+
+impl Capability {
+    // capability 编号来自 uapi/linux/capability.h；ABI 稳定，
+    // 最高位 CHECKPOINT_RESTORE(40) 于 Linux 5.9 引入。
+    pub const CHOWN: Capability = Capability(0);
+    pub const DAC_OVERRIDE: Capability = Capability(1);
+    pub const DAC_READ_SEARCH: Capability = Capability(2);
+    pub const FOWNER: Capability = Capability(3);
+    pub const FSETID: Capability = Capability(4);
+    pub const KILL: Capability = Capability(5);
+    pub const SETGID: Capability = Capability(6);
+    pub const SETUID: Capability = Capability(7);
+    pub const SETPCAP: Capability = Capability(8);
+    pub const LINUX_IMMUTABLE: Capability = Capability(9);
+    pub const NET_BIND_SERVICE: Capability = Capability(10);
+    pub const NET_BROADCAST: Capability = Capability(11);
+    pub const NET_ADMIN: Capability = Capability(12);
+    pub const NET_RAW: Capability = Capability(13);
+    pub const IPC_LOCK: Capability = Capability(14);
+    pub const IPC_OWNER: Capability = Capability(15);
+    pub const SYS_MODULE: Capability = Capability(16);
+    pub const SYS_RAWIO: Capability = Capability(17);
+    pub const SYS_CHROOT: Capability = Capability(18);
+    pub const SYS_PTRACE: Capability = Capability(19);
+    pub const SYS_PACCT: Capability = Capability(20);
+    pub const SYS_ADMIN: Capability = Capability(21);
+    pub const SYS_BOOT: Capability = Capability(22);
+    pub const SYS_NICE: Capability = Capability(23);
+    pub const SYS_RESOURCE: Capability = Capability(24);
+    pub const SYS_TIME: Capability = Capability(25);
+    pub const SYS_TTY_CONFIG: Capability = Capability(26);
+    pub const MKNOD: Capability = Capability(27);
+    pub const LEASE: Capability = Capability(28);
+    pub const AUDIT_WRITE: Capability = Capability(29);
+    pub const AUDIT_CONTROL: Capability = Capability(30);
+    pub const SETFCAP: Capability = Capability(31);
+    pub const MAC_OVERRIDE: Capability = Capability(32);
+    pub const MAC_ADMIN: Capability = Capability(33);
+    pub const SYSLOG: Capability = Capability(34);
+    pub const WAKE_ALARM: Capability = Capability(35);
+    pub const BLOCK_SUSPEND: Capability = Capability(36);
+    pub const AUDIT_READ: Capability = Capability(37);
+    pub const PERFMON: Capability = Capability(38);
+    pub const BPF: Capability = Capability(39);
+    pub const CHECKPOINT_RESTORE: Capability = Capability(40);
+
+    /// 按名称解析 capability。
+    ///
+    /// 接受 `"CHOWN"` / `"cap_chown"` / `"cap.CHOWN"` 等大小写变体（转大写、
+    /// 去 `CAP_`/`CAP.` 前缀后查表）；未知名称返回 `None`。
+    pub fn from_name(name: &str) -> Option<Capability> {
+        const TABLE: &[(&str, Capability)] = &[
+            ("CHOWN", Capability::CHOWN),
+            ("DAC_OVERRIDE", Capability::DAC_OVERRIDE),
+            ("DAC_READ_SEARCH", Capability::DAC_READ_SEARCH),
+            ("FOWNER", Capability::FOWNER),
+            ("FSETID", Capability::FSETID),
+            ("KILL", Capability::KILL),
+            ("SETGID", Capability::SETGID),
+            ("SETUID", Capability::SETUID),
+            ("SETPCAP", Capability::SETPCAP),
+            ("LINUX_IMMUTABLE", Capability::LINUX_IMMUTABLE),
+            ("NET_BIND_SERVICE", Capability::NET_BIND_SERVICE),
+            ("NET_BROADCAST", Capability::NET_BROADCAST),
+            ("NET_ADMIN", Capability::NET_ADMIN),
+            ("NET_RAW", Capability::NET_RAW),
+            ("IPC_LOCK", Capability::IPC_LOCK),
+            ("IPC_OWNER", Capability::IPC_OWNER),
+            ("SYS_MODULE", Capability::SYS_MODULE),
+            ("SYS_RAWIO", Capability::SYS_RAWIO),
+            ("SYS_CHROOT", Capability::SYS_CHROOT),
+            ("SYS_PTRACE", Capability::SYS_PTRACE),
+            ("SYS_PACCT", Capability::SYS_PACCT),
+            ("SYS_ADMIN", Capability::SYS_ADMIN),
+            ("SYS_BOOT", Capability::SYS_BOOT),
+            ("SYS_NICE", Capability::SYS_NICE),
+            ("SYS_RESOURCE", Capability::SYS_RESOURCE),
+            ("SYS_TIME", Capability::SYS_TIME),
+            ("SYS_TTY_CONFIG", Capability::SYS_TTY_CONFIG),
+            ("MKNOD", Capability::MKNOD),
+            ("LEASE", Capability::LEASE),
+            ("AUDIT_WRITE", Capability::AUDIT_WRITE),
+            ("AUDIT_CONTROL", Capability::AUDIT_CONTROL),
+            ("SETFCAP", Capability::SETFCAP),
+            ("MAC_OVERRIDE", Capability::MAC_OVERRIDE),
+            ("MAC_ADMIN", Capability::MAC_ADMIN),
+            ("SYSLOG", Capability::SYSLOG),
+            ("WAKE_ALARM", Capability::WAKE_ALARM),
+            ("BLOCK_SUSPEND", Capability::BLOCK_SUSPEND),
+            ("AUDIT_READ", Capability::AUDIT_READ),
+            ("PERFMON", Capability::PERFMON),
+            ("BPF", Capability::BPF),
+            ("CHECKPOINT_RESTORE", Capability::CHECKPOINT_RESTORE),
+        ];
+        let upper = name.to_uppercase();
+        let stripped = upper
+            .strip_prefix("CAP_")
+            .or_else(|| upper.strip_prefix("CAP."))
+            .unwrap_or(upper.as_str());
+        TABLE
+            .iter()
+            .find(|(n, _)| *n == stripped)
+            .map(|(_, cap)| *cap)
+    }
+
+    /// 返回 capability 编号。
+    pub const fn as_u16(self) -> u16 {
+        self.0
+    }
+}
+
+/// 单条 capability 操作。
+///
+/// 由 `--cap-add` / `--cap-drop`（含 `ALL`）展开，按命令行顺序应用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapOp {
+    /// 添加单个 capability（`--cap-add CHOWN`）。
+    Add(Capability),
+    /// 丢弃单个 capability（`--cap-drop CHOWN`）。
+    Drop(Capability),
+    /// 添加全部 capability（`--cap-add ALL`）。
+    AddAll,
+    /// 丢弃全部 capability（`--cap-drop ALL`）。
+    DropAll,
+}
+
+impl CapOp {
+    /// 从 CLI 名称解析操作。
+    ///
+    /// `"ALL"`（大小写不敏感）→ [`CapOp::AddAll`]/[`CapOp::DropAll`]；
+    /// 其余名称交给 [`Capability::from_name`]，未知名 `anyhow::bail!`。
+    pub fn from_cli(name: &str, is_add: bool) -> anyhow::Result<Self> {
+        if name.eq_ignore_ascii_case("ALL") {
+            return Ok(if is_add {
+                CapOp::AddAll
+            } else {
+                CapOp::DropAll
+            });
+        }
+        let cap = Capability::from_name(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown capability name: '{name}'"))?;
+        Ok(if is_add {
+            CapOp::Add(cap)
+        } else {
+            CapOp::Drop(cap)
+        })
+    }
+}
+
+/// capability 权限配置。
+///
+/// 默认零 cap（起点空集，D1）；`inherit_base` 为 `--cap-inherit` 逃生门，
+/// 使起点位图继承当前进程 effective caps。
+#[derive(Debug, Clone, Default)]
+pub struct CapabilityConfig {
+    /// 按命令行顺序应用的 cap 操作列表。
+    pub ops: Vec<CapOp>,
+    /// 是否继承当前进程 effective caps 作为起点。
+    pub inherit_base: bool,
+}
+
+impl CapabilityConfig {
+    /// 是否存在 cap-add 类操作（Add/AddAll）。D2：仅 cap-add 需要自动叠加 userns。
+    pub fn has_add(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(op, CapOp::Add(_) | CapOp::AddAll))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -555,5 +774,108 @@ mod tests {
         assert_eq!(spec.target, "/mnt/tmp");
         assert_eq!(spec.fstype, "tmpfs");
         assert_eq!(spec.flags, MS_NOSUID | MS_NODEV);
+    }
+
+    #[test]
+    fn test_capability_from_name() {
+        assert_eq!(Capability::from_name("CHOWN"), Some(Capability::CHOWN));
+        assert_eq!(Capability::from_name("cap_chown"), Some(Capability::CHOWN));
+        assert_eq!(Capability::from_name("cap.CHOWN"), Some(Capability::CHOWN));
+        assert_eq!(Capability::from_name("chown"), Some(Capability::CHOWN));
+        assert_eq!(Capability::from_name("NET_RAW"), Some(Capability::NET_RAW));
+        assert_eq!(Capability::from_name("net_raw"), Some(Capability::NET_RAW));
+        assert_eq!(
+            Capability::from_name("SYS_ADMIN"),
+            Some(Capability::SYS_ADMIN)
+        );
+        assert_eq!(Capability::from_name("not_a_cap"), None);
+        assert_eq!(Capability::from_name(""), None);
+    }
+
+    #[test]
+    fn test_capability_as_u16() {
+        assert_eq!(Capability::CHOWN.as_u16(), 0);
+        assert_eq!(Capability::NET_RAW.as_u16(), 13);
+        assert_eq!(Capability::CHECKPOINT_RESTORE.as_u16(), 40);
+    }
+
+    #[test]
+    fn test_cap_op_from_cli() {
+        assert_eq!(CapOp::from_cli("ALL", true).unwrap(), CapOp::AddAll);
+        assert_eq!(CapOp::from_cli("all", false).unwrap(), CapOp::DropAll);
+        assert_eq!(
+            CapOp::from_cli("chown", true).unwrap(),
+            CapOp::Add(Capability::CHOWN)
+        );
+        assert_eq!(
+            CapOp::from_cli("NET_RAW", false).unwrap(),
+            CapOp::Drop(Capability::NET_RAW)
+        );
+        assert!(CapOp::from_cli("unknown_cap", true).is_err());
+    }
+
+    #[test]
+    fn test_capability_config_default() {
+        let cfg = CapabilityConfig::default();
+        assert!(cfg.ops.is_empty());
+        assert!(!cfg.inherit_base);
+    }
+
+    #[test]
+    fn test_capability_config_has_add() {
+        // 空配置无 cap-add → 不触发 userns（D2）。
+        assert!(!SandboxConfig::default().capabilities.has_add());
+        // 仅 cap-drop 不触发（cap-drop 无回灌风险）。
+        assert!(!SandboxConfig::default()
+            .with_cap_drop("chown")
+            .expect("valid cap")
+            .capabilities
+            .has_add());
+        assert!(!SandboxConfig::default()
+            .with_cap_drop_all()
+            .capabilities
+            .has_add());
+        // cap-add 单条与 ALL 都触发。
+        assert!(SandboxConfig::default()
+            .with_cap_add("chown")
+            .expect("valid cap")
+            .capabilities
+            .has_add());
+        assert!(SandboxConfig::default()
+            .with_cap_add_all()
+            .capabilities
+            .has_add());
+    }
+
+    #[test]
+    fn test_with_cap_add_drop() {
+        let config = SandboxConfig::default()
+            .with_cap_add("chown")
+            .expect("valid cap")
+            .with_cap_drop("net_raw")
+            .expect("valid cap")
+            .with_cap_add_all()
+            .with_cap_drop_all()
+            .with_cap_inherit(true);
+
+        assert_eq!(config.capabilities.ops.len(), 4);
+        assert_eq!(config.capabilities.ops[0], CapOp::Add(Capability::CHOWN));
+        assert_eq!(config.capabilities.ops[1], CapOp::Drop(Capability::NET_RAW));
+        assert_eq!(config.capabilities.ops[2], CapOp::AddAll);
+        assert_eq!(config.capabilities.ops[3], CapOp::DropAll);
+        assert!(config.capabilities.inherit_base);
+    }
+
+    #[test]
+    fn test_with_cap_add_drop_error() {
+        assert!(SandboxConfig::default().with_cap_add("not_a_cap").is_err());
+        assert!(SandboxConfig::default().with_cap_drop("not_a_cap").is_err());
+    }
+
+    #[test]
+    fn test_sandbox_config_default_capabilities() {
+        let config = SandboxConfig::default();
+        assert!(config.capabilities.ops.is_empty());
+        assert!(!config.capabilities.inherit_base);
     }
 }

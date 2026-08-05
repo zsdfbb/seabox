@@ -63,6 +63,56 @@ fn collect_mount_actions(
     actions.into_iter().map(|(_, a)| a).collect()
 }
 
+/// 一条 capability 操作，按 CLI 出现顺序应用。
+///
+/// 仿 [`MountAction`]：`--cap-add` / `--cap-drop` 在命令行上可以任意交错，
+/// 且覆盖语义依赖顺序（先 add 后 drop 或反之）。clap derive 会把两个 flag
+/// 收进两个独立 Vec，丢失跨 flag 的全局顺序，因此用 `indices_of` 恢复。
+///
+/// `"ALL"`（大小写不敏感）在收集时直接映射为 [`CapAction::AddAll`] /
+/// [`CapAction::DropAll`]；其余名称在 cmd_run 应用时交给 `with_cap_add` /
+/// `with_cap_drop` 解析，未知名在此处报错。
+#[derive(Debug)]
+enum CapAction {
+    Add(String),
+    Drop(String),
+    AddAll,
+    DropAll,
+}
+
+/// 按 CLI 参数出现顺序合并 `--cap-add` / `--cap-drop`。
+///
+/// 参照 bwrap：capability 按命令行顺序处理，后出现的操作覆盖先前结果。
+fn collect_cap_actions(
+    matches: &clap::ArgMatches,
+    cap_add: &[String],
+    cap_drop: &[String],
+) -> Vec<CapAction> {
+    let mut actions: Vec<(usize, CapAction)> = Vec::new();
+    if let Some(indices) = matches.indices_of("cap_add") {
+        for (i, name) in indices.zip(cap_add) {
+            let action = if name.eq_ignore_ascii_case("ALL") {
+                CapAction::AddAll
+            } else {
+                CapAction::Add(name.clone())
+            };
+            actions.push((i, action));
+        }
+    }
+    if let Some(indices) = matches.indices_of("cap_drop") {
+        for (i, name) in indices.zip(cap_drop) {
+            let action = if name.eq_ignore_ascii_case("ALL") {
+                CapAction::DropAll
+            } else {
+                CapAction::Drop(name.clone())
+            };
+            actions.push((i, action));
+        }
+    }
+    actions.sort_by_key(|(i, _)| *i);
+    actions.into_iter().map(|(_, a)| a).collect()
+}
+
 // ---------------------------------------------------------------------------
 // CLI 定义
 // ---------------------------------------------------------------------------
@@ -228,6 +278,16 @@ enum Cli {
         #[arg(long, value_name = "NR")]
         seccomp_deny_nr: Vec<u32>,
 
+        /// 在沙箱中保留的 capabilities（可重复，可 ALL，按命令行顺序应用；默认不保留任何 cap）
+        #[arg(long, value_name = "CAP")]
+        cap_add: Vec<String>,
+        /// 从沙箱中移除的 capabilities（可重复，可 ALL，按命令行顺序应用）
+        #[arg(long, value_name = "CAP")]
+        cap_drop: Vec<String>,
+        /// 起点继承当前进程的 capability 位图（bwrap root 语义；默认从空集开始）
+        #[arg(long)]
+        cap_inherit: bool,
+
         /// 从文件描述符读取外部原始 cBPF filter（可重复）
         ///
         /// 从指定 fd 读取原始 cBPF 字节码并追加到 seccomp filter 链。
@@ -298,6 +358,9 @@ fn main() -> anyhow::Result<()> {
             ref tmpfs,
             seccomp_deny_nr,
             seccomp_filter_fd,
+            ref cap_add,
+            ref cap_drop,
+            cap_inherit,
             timeout,
             timeout_max,
         } => {
@@ -306,6 +369,7 @@ fn main() -> anyhow::Result<()> {
                 .subcommand_matches("run")
                 .expect("matched Run subcommand");
             let mount_actions = collect_mount_actions(run_matches, bind, ro_bind, tmpfs);
+            let cap_actions = collect_cap_actions(run_matches, cap_add, cap_drop);
             cmd_run(
                 landlock,
                 allow_network,
@@ -330,6 +394,9 @@ fn main() -> anyhow::Result<()> {
                 unsetenv,
                 clearenv,
                 mount_actions,
+                cap_add,
+                cap_actions,
+                cap_inherit,
                 seccomp_deny_nr,
                 seccomp_filter_fd,
                 timeout,
@@ -371,6 +438,9 @@ fn cmd_run(
     unsetenv: Vec<String>,
     clearenv: bool,
     mount_actions: Vec<MountAction>,
+    cap_add: &[String],
+    cap_actions: Vec<CapAction>,
+    cap_inherit: bool,
     seccomp_deny_nrs: Vec<u32>,
     seccomp_filter_fds: Vec<std::os::unix::io::RawFd>,
     timeout: Option<u64>,
@@ -402,6 +472,7 @@ fn cmd_run(
     let mut config = build_config(
         landlock,
         effective_network,
+        cap_add,
         unshare_all,
         unshare_user,
         unshare_ipc,
@@ -417,6 +488,20 @@ fn cmd_run(
         hostname,
         timeout_max,
     )?;
+
+    // --cap-add / --cap-drop: 按 CLI 顺序应用（含 ALL）。未知 cap 名在此报错。
+    for action in cap_actions {
+        config = match action {
+            CapAction::Add(name) => config.with_cap_add(&name)?,
+            CapAction::Drop(name) => config.with_cap_drop(&name)?,
+            CapAction::AddAll => config.with_cap_add_all(),
+            CapAction::DropAll => config.with_cap_drop_all(),
+        };
+    }
+    // --cap-inherit: 起点继承当前进程 capability 位图（D1 逃生门）。
+    if cap_inherit {
+        config = config.with_cap_inherit(true);
+    }
 
     // --bind / --ro-bind / --tmpfs: 按 CLI 顺序添加 mount 规格。
     // 覆盖语义依赖顺序：先挂基座（如 --ro-bind），再挂叠加层
@@ -548,6 +633,7 @@ fn resolve_network_config(
 fn build_config(
     landlock: Vec<String>,
     loopback_enabled: bool,
+    cap_add: &[String],
     // namespace flags
     unshare_all: bool,
     unshare_user: bool,
@@ -574,7 +660,13 @@ fn build_config(
     let need_user_for_pid = pid_without_user && unsafe { libc::geteuid() } != 0;
     let net_without_user = unshare_net && !unshare_all && !unshare_user;
     let need_user_for_net = net_without_user && unsafe { libc::geteuid() } != 0;
-    let effective_user = unshare_user || unshare_all || need_user_for_pid || need_user_for_net;
+    // --cap-add 需要 user ns 承载新增 cap（D2：防 cap 回灌宿主命名空间），root 也触发。
+    let need_user_for_cap_add = !cap_add.is_empty();
+    let effective_user = unshare_user
+        || unshare_all
+        || need_user_for_pid
+        || need_user_for_net
+        || need_user_for_cap_add;
 
     Ok(SandboxConfig {
         landlock: rules,
@@ -600,12 +692,105 @@ fn build_config(
         timeout_max_secs: timeout_max.unwrap_or(300),
         seccomp_deny_nrs: vec![],
         seccomp_filter_bytes: vec![],
+        // --cap-add/--cap-drop/--cap-inherit 在 cmd_run 中按 CLI 顺序应用。
+        capabilities: seabox::config::CapabilityConfig::default(),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_network_config;
+    use super::{collect_cap_actions, resolve_network_config, CapAction, Cli};
+    use clap::{CommandFactory, FromArgMatches};
+
+    /// 保序语义：`--cap-add X --cap-drop Y --cap-add ALL` 交错出现时按 CLI 出现顺序
+    /// 合并为 `[Add(X), Drop(Y), AddAll]`（仿 collect_mount_actions 的 indices_of 保序，
+    /// 覆盖语义依赖顺序：先 add 后 drop 或反之）。
+    #[test]
+    fn collect_cap_actions_preserves_cli_order() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "seabox",
+                "run",
+                "--cap-add",
+                "CHOWN",
+                "--cap-drop",
+                "NET_RAW",
+                "--cap-add",
+                "ALL",
+                "--",
+                "true",
+            ])
+            .expect("cli args should parse");
+        let cli = Cli::from_arg_matches(&matches).expect("from_arg_matches");
+        let (cap_add, cap_drop) = match cli {
+            Cli::Run {
+                cap_add, cap_drop, ..
+            } => (cap_add, cap_drop),
+            _ => unreachable!("expected Run subcommand"),
+        };
+        let run_matches = matches
+            .subcommand_matches("run")
+            .expect("run subcommand matches");
+        let actions = collect_cap_actions(run_matches, &cap_add, &cap_drop);
+
+        assert_eq!(actions.len(), 3, "three interleaved cap actions");
+        assert!(
+            matches!(&actions[0], CapAction::Add(n) if n == "CHOWN"),
+            "first action should be Add(CHOWN), got: {:?}",
+            actions
+        );
+        assert!(
+            matches!(&actions[1], CapAction::Drop(n) if n == "NET_RAW"),
+            "second action should be Drop(NET_RAW), got: {:?}",
+            actions
+        );
+        assert!(
+            matches!(actions[2], CapAction::AddAll),
+            "third action should be AddAll, got: {:?}",
+            actions
+        );
+    }
+
+    /// `ALL` 大小写不敏感映射 + 尾部 drop-all：`--cap-add all --cap-drop ALL` →
+    /// `[AddAll, DropAll]`（保序，后出现的 drop-all 覆盖前面的 add-all）。
+    #[test]
+    fn collect_cap_actions_maps_all_case_insensitive() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "seabox",
+                "run",
+                "--cap-add",
+                "all",
+                "--cap-drop",
+                "ALL",
+                "--",
+                "true",
+            ])
+            .expect("cli args should parse");
+        let cli = Cli::from_arg_matches(&matches).expect("from_arg_matches");
+        let (cap_add, cap_drop) = match cli {
+            Cli::Run {
+                cap_add, cap_drop, ..
+            } => (cap_add, cap_drop),
+            _ => unreachable!("expected Run subcommand"),
+        };
+        let run_matches = matches
+            .subcommand_matches("run")
+            .expect("run subcommand matches");
+        let actions = collect_cap_actions(run_matches, &cap_add, &cap_drop);
+
+        assert_eq!(actions.len(), 2, "two ALL actions");
+        assert!(
+            matches!(actions[0], CapAction::AddAll),
+            "lowercase 'all' should map to AddAll, got: {:?}",
+            actions
+        );
+        assert!(
+            matches!(actions[1], CapAction::DropAll),
+            "uppercase 'ALL' on drop should map to DropAll, got: {:?}",
+            actions
+        );
+    }
 
     #[test]
     fn default_no_network_flags() {

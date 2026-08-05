@@ -13,11 +13,13 @@ use seabox::config::SandboxConfig;
 use seabox::{CommandSpec, Sandbox};
 
 fn main() -> anyhow::Result<()> {
-    // ── 构建配置（等价于 CLI: --unshare-all --uid 1000
+    // ── 构建配置（等价于 CLI: --unshare-all --uid 1000 --cap-drop ALL
     //    --landlock '/:ro' --landlock '/tmp:rw') ───
+    //    默认不保留任何 cap，显式 `with_cap_drop_all()` 收紧（示范 capability API）。
     let config = SandboxConfig::default()
         .with_unshare_all()
         .with_uid(1000)
+        .with_cap_drop_all()
         .with_landlock("/:ro")?
         .with_landlock("/tmp:rw")?
         .with_timeout(10, 60);

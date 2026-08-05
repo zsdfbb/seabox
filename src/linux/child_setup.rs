@@ -66,9 +66,10 @@ pub struct ExtFilterDesc {
 /// 6. uid/gid map 写入 `/proc/self/uid_map` 等（user ns 需要）
 /// 7. `sethostname()`（UTS 需要）
 /// 8. `landlock_restrict_self()`（Landlock 规则需要）
-/// 9. seccomp USER_NOTIF filter 安装 + `sendmsg(SCM_RIGHTS)`
-/// 10. 外部 plain BPF filter 安装
-/// 11. `execve()` 启动目标程序
+/// 9. capability 收窄（`capset` / bounding / ambient，仅 `--cap-*` 指定时）
+/// 10. seccomp USER_NOTIF filter 安装 + `sendmsg(SCM_RIGHTS)`
+/// 11. 外部 plain BPF filter 安装
+/// 12. `execve()` 启动目标程序
 ///
 /// # Safety
 ///
@@ -79,6 +80,9 @@ pub struct ExtFilterDesc {
 /// - `uid_map` / `gid_map` 的内容格式符合 `/proc/self/*_map` 要求
 /// - `hostname` 是合法的主机名字节序列（长度 <= 64）
 /// - `mount_ops` 数组中的所有 `RawMountOp` 指针指向 fork 前预分配的 CString 存储
+/// - `caps_requested` / `caps_flags` 是父进程 fork 前经 [`caps::resolve_caps`]
+///   解析好的目标位图与原语 flags；`caps_flags != 0` 时会在 seccomp 安装前调用
+///   零堆的 [`caps::apply_caps`] 收窄 capability
 ///
 /// 此函数永远不返回：要么通过 `execve` 转为目标程序，要么 `_exit`。
 #[allow(clippy::too_many_arguments)]
@@ -108,6 +112,8 @@ pub unsafe fn enter_child(
     mount_ops: *const RawMountOp,
     mount_ops_len: usize,
     do_private: bool,
+    caps_requested: u64,
+    caps_flags: u8,
 ) {
     // ── 第 1 步：创建常规 namespace（不含 PID）────────────────────
     let mut user_ns_active = user_ns_active;
@@ -219,7 +225,14 @@ pub unsafe fn enter_child(
         libc::close(ruleset_fd);
     }
 
-    // ── 第 8 步：seccomp USER_NOTIF filter ──────────────────
+    // ── 第 8 步：capability 收窄（capset / bounding / ambient）──
+    if caps_flags != 0 {
+        // SAFETY: 调用方保证 caps_requested / caps_flags 是 resolve_caps 的
+        // 合法输出；apply_caps 零堆、async-signal-safe，失败以 _exit(1) 收场。
+        super::caps::apply_caps(caps_requested, caps_flags);
+    }
+
+    // ── 第 9 步：seccomp USER_NOTIF filter ──────────────────
     if bpf_filter_len > 0 {
         // SAFETY: 调用方保证 bpf_filter_ptr 有效且长度为 bpf_filter_len。
         let filter = std::slice::from_raw_parts(bpf_filter_ptr, bpf_filter_len);
@@ -239,7 +252,7 @@ pub unsafe fn enter_child(
         }
     }
 
-    // ── 第 9 步：外部 plain BPF filter ──────────────────────
+    // ── 第 10 步：外部 plain BPF filter ─────────────────────
     if ext_filters_len > 0 {
         // SAFETY: 调用方保证 ext_filters 有效且长度为 ext_filters_len，
         // 且每个 desc.data 指向一个长度 >= desc.len 的 sock_filter 数组。
@@ -256,7 +269,7 @@ pub unsafe fn enter_child(
         }
     }
 
-    // ── 第 10 步：execve ─────────────────────────────────────
+    // ── 第 11 步：execve ─────────────────────────────────────
     // SAFETY: exec_path、argv、envp 由调用方保证有效且格式正确。
     // man:execve(2)
     libc::execve(exec_path, argv, envp);
