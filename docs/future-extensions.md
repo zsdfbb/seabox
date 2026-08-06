@@ -6,6 +6,13 @@
 
 当前策略是**静态配置 + 明确拒绝**。未来需要 Agent 在沙箱拒绝时**主动询问用户**或根据运行时上下文调整策略，可考虑以下机制。
 
+> **2026-08-06 评估结论：动态授权暂缓，先做 coding-agent profile。**
+> 讨论"base 权限（agent 不可修改）+ agent 动态叠加"后得出的结论：
+> - coding agent 真实权限需求约 95% 静态（工作区 rw + /tmp rw + loopback + 默认零 cap），打包现有 flag 成 TOML profile 即覆盖，无需新机制。
+> - 动态叠加唯一实值是 **per-command 最小权限**（缩小单条命令爆炸半径），属防御纵深优化而非功能需求。
+> - 权限 UX（allow/ask/deny）是 agent 框架的职责；seabox 若做运行时请求通道，会重复框架 UX 并引入"不可信 agent → 可信 host"的 IPC 攻击面。
+> - 若日后重评，最小形态是 `seabox::policy` 模块（`BasePolicy + PermissionRequest + merge()`），作为给 host 框架的校验 helper，而非运行时通道。信任边界必须在 host 进程（agent 不可直接配置 seabox）；安全性靠单调性：Landlock grant-only / seccomp deny-only / caps 上限。**"base 不可修改"要同时表达 floor（强制基线，不可削弱）与 ceiling（允许扩张菜单，菜单法避免路径解析）**。
+
 ### Violation Hook（轻量）
 
 ```rust
