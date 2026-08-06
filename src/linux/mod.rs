@@ -13,7 +13,7 @@
 //!    - `unshare(namespace_flags)`（创建 user/ipc/net/uts/cgroup 命名空间）
 //!    - `unshare(CLONE_NEWPID)` + `fork()`（PID 命名空间 + reaper，如需要）
 //!    - 环境变量通过 execve envp 参数传递（fork 前预计算）
-//!    - `chdir()`（工作目录）
+//!    - `fchdir()`（工作目录，用 fork 前打开的 O_PATH fd）
 //!    - `prctl(PR_SET_NO_NEW_PRIVS, 1, …)`
 //!    - `write(/proc/self/uid_map + gid_map)`（user ns 映射，如需要）
 //!    - `sethostname()`（UTS 主机名，如需要）
@@ -231,8 +231,23 @@ impl SandboxImpl for LinuxSandbox {
         let mut argv: Vec<*const libc::c_char> = argv_cstrings.iter().map(|a| a.as_ptr()).collect();
         argv.push(std::ptr::null());
 
-        // ── 预计算 cwd CString（chdir 用）──
+        // ── 预计算 cwd 目录 fd（fork 前打开，子进程 fchdir 用）──
+        // O_PATH：只需目录引用。避免 userns 内 uid（如 root 进 userns 后失去
+        // 宿主 DAC_OVERRIDE）无法遍历宿主路径（如 750 家目录）导致 chdir EACCES。
         let cwd_c = CString::new(cwd.to_str().unwrap_or("/")).unwrap_or_default();
+        // SAFETY: cwd_c 以 NUL 结尾；打开失败返回 Err。
+        let cwd_raw = unsafe {
+            libc::open(
+                cwd_c.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if cwd_raw < 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("failed to open cwd '{}'", cwd.display()));
+        }
+        // SAFETY: cwd_raw 是刚打开的有效 fd；交给 OwnedFd 由 RAII 在 execute 结束时关闭（父进程侧）。
+        let cwd_fd = unsafe { OwnedFd::from_raw_fd(cwd_raw) };
 
         // ── 解析程序路径（execve 不搜 PATH，需提前解析）──
         let exec_path = resolve_exec_path(&spec.program, &spec.env);
@@ -284,7 +299,7 @@ impl SandboxImpl for LinuxSandbox {
                     exec_path.as_ptr(),
                     argv.as_ptr(),
                     envp.as_ptr(),
-                    cwd_c.as_ptr(),
+                    cwd_fd.as_raw_fd(),
                     raw_ruleset_fd,
                     bpf_filter
                         .as_ref()

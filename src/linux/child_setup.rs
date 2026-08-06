@@ -61,7 +61,7 @@ pub struct ExtFilterDesc {
 /// 1. `unshare()` 创建常规 namespace（user/mnt/ipc/net/uts/cgroup）
 /// 2. mount namespace 初始化（make_private + do_mounts）
 /// 3. double-fork + reaper（PID namespace 需要）
-/// 4. `chdir()`（工作目录）
+/// 4. `fchdir()`（工作目录，用 fork 前打开的 O_PATH fd）
 /// 5. `prctl(PR_SET_NO_NEW_PRIVS)`
 /// 6. uid/gid map 写入 `/proc/self/uid_map` 等（user ns 需要）
 /// 7. `sethostname()`（UTS 需要）
@@ -76,6 +76,8 @@ pub struct ExtFilterDesc {
 /// 调用者必须保证：
 /// - 所有指针参数指向可读内存，且在整个函数调用期间有效
 /// - 此函数只在 `fork()` 后的子进程中调用，子进程中无堆操作
+/// - `cwd_fd` 是父进程 fork 前打开的 cwd 目录 fd（`O_PATH|O_DIRECTORY|O_CLOEXEC`），
+///   子进程用 `fchdir` 切换工作目录，避免 userns 内 uid 无法遍历宿主路径
 /// - `ns_ops` / `ext_filters` 数组中的所有指针同样有效
 /// - `uid_map` / `gid_map` 的内容格式符合 `/proc/self/*_map` 要求
 /// - `hostname` 是合法的主机名字节序列（长度 <= 64）
@@ -90,7 +92,7 @@ pub unsafe fn enter_child(
     exec_path: *const libc::c_char,
     argv: *const *const libc::c_char,
     envp: *const *const libc::c_char,
-    cwd: *const libc::c_char,
+    cwd_fd: i32,
     ruleset_fd: i32,
     bpf_filter_ptr: *const seccomp::sock_filter,
     bpf_filter_len: usize,
@@ -181,10 +183,13 @@ pub unsafe fn enter_child(
         // ── PID 2（业务进程）：继续后续 setup ──
     }
 
-    // ── 第 3 步：chdir ──────────────────────────────────────────
-    if libc::chdir(cwd) != 0 {
+    // ── 第 3 步：fchdir ────────────────────────────────────────
+    // 用 fork 前父进程打开的 O_PATH 目录 fd，避免 userns 内 uid 无法遍历
+    // 宿主路径（如 750 家目录）导致的 chdir EACCES（root + userns 场景）。
+    if libc::fchdir(cwd_fd) != 0 {
         libc::_exit(1);
     }
+    libc::close(cwd_fd);
 
     // ── 第 4 步：prctl(PR_SET_NO_NEW_PRIVS) ────────────────────
     if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
