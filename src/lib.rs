@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod cli;
 pub mod config;
+pub mod profile;
 
 pub use config::{CapOp, Capability, CapabilityConfig, SandboxConfig};
 

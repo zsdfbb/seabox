@@ -304,6 +304,18 @@ impl SandboxConfig {
     pub fn into_sandbox(self) -> anyhow::Result<crate::Sandbox> {
         crate::Sandbox::from_config(self)
     }
+
+    /// 从 CLI flag 文本序列构建配置（crate API 镜像，与 CLI 走同一 clap 解析管线）。
+    ///
+    /// 等价于 `seabox run <args> -- true` 的沙箱配置部分；`args` 中可含
+    /// `@file` token 与 `{workspace}`/`~` 占位符（与 CLI 一致）。
+    pub fn from_flag_args<I, S>(args: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        crate::cli::config_from_flag_args(args)
+    }
 }
 
 // ---------------------------------------------------------------------------
