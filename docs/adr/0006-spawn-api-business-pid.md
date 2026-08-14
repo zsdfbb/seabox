@@ -99,8 +99,9 @@ seabox 是**进程内 fork + pre_exec** 模型，无法委托 `std::process::Com
 - **R2 SCM_CREDENTIALS 容器化 caveat**：实测在 init pid-ns。seabox 若部署在容器 pid-ns 内，
   内核交付的 pid 相对容器 init-ns 有效（seabox 父与子同 ns 层级 → kill() 成立）；跨 host 边界
   场景由阶段 3 探针测试兜底。
-- **R3 execute 从继承改捕获**（design.md 0.5 已接受）：CLI 交互式 stdin 变读 EOF；tty 走阶段 2
-  `StdioConfig::Fd`。
+- **R3 execute 捕获 vs CLI 流式**：✅ **修订定案（2026-08-14）**——库 `execute` 捕获（CodeWhale
+  结构化全量输出所需）；**cmd_run 改走 `spawn(StdioConfig::Inherit)` 保持流式 + 交互 stdin**，
+  design.md 0.5「CLI 交互 stdin 变 EOF」的退化随之消解。见 design-spawn-api.md §6.5。
 - **R4 `expand_tilde` 换 `$HOME` 失 getpwuid fallback**：边缘场景，注释声明。
 - **R5 execute 重构回归面**：precompute 迁入 spawn + 默认 execute 重写，全量 `cargo test` +
   clippy 兜底，先于 CodeWhale 改动合入。

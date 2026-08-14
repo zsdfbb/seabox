@@ -88,7 +88,7 @@ src/child.rs  [NEW]    run_to_output()（平台无关 execute：drain + 超时 +
 src/linux/mod.rs       LinuxSandbox::spawn()（现 execute 的 precompute 迁入）/
                        LinuxChild(impl SandboxChildImpl) / recv_hello / worker 按值收 fd / Drop
 src/linux/child_setup.rs  ChildIo(POD) / setpgid / dup2 stdio / send_hello(SCM_RIGHTS+SO_PASSCRED)
-src/main.rs            cmd_run：回打捕获输出 + timed_out→exit 124 + SIGINT/SIGTERM 转发
+src/main.rs            cmd_run：spawn(Inherit) 流式 + timed_out→exit 124 + SIGINT/SIGTERM 转发
 Cargo.toml             [features] cli；[[bin]] required-features
 ```
 
@@ -335,10 +335,30 @@ Drop(LinuxChild)：
   OwnedFd RAII 关 3 个 pipe fd
 ```
 
-### 6.5 cmd_run 信号转发（R2 评审采纳：职责限 CLI，不进库）
+### 6.5 cmd_run：spawn(Inherit) 流式 + 信号转发（评审修订）
 
-`process_group` 默认 true 使子进程脱离终端前台组 → Ctrl+C 只杀 seabox 自己。cmd_run 转发
-SIGINT/SIGTERM 到子进程组。**实现机制（不引新依赖，手写，全 async-signal-safe）**：
+**cmd_run 走 `spawn(StdioConfig::Inherit)`，不走 `execute`（Piped 捕获）**——CLI 是给人用的
+门面，需要流式输出 + 交互 stdin；库的 `execute` 保持捕获服务 CodeWhale（结构化全量输出）。
+两条路各有其主：
+
+```rust
+fn cmd_run(config: SandboxConfig, spec: RunSpec) -> anyhow::Result<()> {
+    let sandbox = Sandbox::from_config(config)?;
+    let mut child = sandbox.spawn(&command, StdioConfig::Inherit)?;  // 流式：子进程直写终端
+    let status = child.wait_timeout(command.timeout)?;               // 超时强制保留
+    let reason = sandbox.classify_exit(code_of(status), child.blocked());  // 拒绝诊断保留
+    // blocked() 结构化 → Denied 消息 / Program 退出码 / timed_out → exit 124
+}
+```
+
+> **修订（2026-08-14）**：原设计 cmd_run 接 `execute`（Piped 捕获 + 回打），牺牲 CLI 流式与
+> 交互 stdin（§9.2 曾标注为已知退化）。改用 `spawn(Inherit)` 后：
+> 流式输出 ✅、交互 stdin（`cat`）✅ 恢复、超时强制 ✅、`blocked` 结构化拒绝诊断 ✅、
+> 信号转发 ✅——进程管理能力（kill/超时/信号）全在 `SandboxChild`/spawn 层，**与 stdio 接法无关**。
+
+**信号转发（职责限 CLI，不进库）**：`process_group` 默认 true 使子进程脱离终端前台组 →
+Ctrl+C 只杀 seabox 自己。cmd_run 转发 SIGINT/SIGTERM 到子进程组。
+**实现机制（不引新依赖，手写，全 async-signal-safe）**：
 
 ```rust
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);   // 当前正在执行子进程的 kill_pid（进程组 id）
@@ -349,13 +369,13 @@ extern "C" fn forward(sig: libc::c_int) {
     unsafe { libc::_exit(128 + sig); }                    // seabox 也退出（GNU 惯例）
 }
 
-// cmd_run：execute 前 signal(SIGINT/ SIGTERM, forward)；spawn 后存、wait 后清 CHILD_PGID
+// cmd_run：signal(SIGINT/SIGTERM, forward) 安装后 → spawn → 存 CHILD_PGID → wait_timeout → 清
 ```
 
 - `kill` / `_exit` / `AtomicI32::load` 均 async-signal-safe；handler 内无锁、无堆。
-- **职责边界**：信号处理**只在 cmd_run（CLI 层）**。库的 `execute` 是同步阻塞、可被多线程
-  并发调用——全局 `CHILD_PGID` 在并发下会串扰，故库不碰信号；调用方（CodeWhale）用自己的
-  tokio 信号机制（`tokio::signal`）处理。
+- **职责边界**：信号处理**只在 cmd_run（CLI 层）**。库的 `execute`/`spawn` 是同步阻塞、可被
+  多线程并发调用——全局 `CHILD_PGID` 在并发下会串扰，故库不碰信号；调用方（CodeWhale）用
+  自己的 tokio 信号机制（`tokio::signal`）处理。
 - 备选 `signal-hook` 依赖：为 3 个信号引依赖略重，倾向手写；若日后需要多 handler 再引入。
 
 ---
@@ -420,8 +440,11 @@ dirs 移除）。A 的「两条消息」被 C 的合并消息取代；B 的「wa
    `setpgid(0,0)` 使沙箱子进程脱离终端前台进程组 → `seabox run -- sleep 100` 后 Ctrl+C 不再直接
    命中子进程。cmd_run 转发 SIGINT/SIGTERM 到子进程组，CLI Ctrl+C 行为由信号转发保住；
    CodeWhale 开箱即得组杀语义。
-2. **execute 从继承改捕获（design.md 0.5 已接受）**：CLI 交互式 stdin（`seabox run -- cat`）
-   从读终端变读 EOF；交互/tty 走阶段 2 `StdioConfig::Fd`。属已批准变更。
+2. **cmd_run 用 spawn(Inherit) 流式，而非 execute 捕获（2026-08-14 修订）**：✅ **修订定案**。
+   design.md 0.5 原定「execute 从继承改捕获 + cmd_run 回打」，代价是 CLI 流式退化为一次性打印、
+   交互 stdin（`seabox run -- cat`）变读 EOF。现修订为 **cmd_run 走 `spawn(StdioConfig::Inherit)`**
+   （流式 + 交互 stdin 恢复），库的 `execute` 保持捕获（服务 CodeWhale 结构化全量输出）。两条路
+   各有其主，进程管理能力（超时/信号/拒绝诊断）与 stdio 接法无关，完整保留。见 §6.5。
 
 ---
 
@@ -475,7 +498,7 @@ dirs 移除）。A 的「两条消息」被 C 的合并消息取代；B 的「wa
 | SCM_CREDENTIALS 跨 ns 语义依赖内核（实测通过） | 测试 7 直接断言 `id()`==宿主 pid；容器化 caveat 测试 12 |
 | process_group 默认 true 改变 CLI Ctrl+C 行为 | cmd_run 转发 SIGINT/SIGTERM；决策点 §9.1 |
 | spawn 有界阻塞（setup 挂起→2s 超时 Err） | 与 std::process exec 失败检测同类，属正确失败非 hang |
-| execute 从 inherit 改 capture（流式→缓冲） | cmd_run 回打；全量回归；tty 走阶段 2 |
+| 库 execute 从 inherit 改 capture（流式→缓冲） | 库 `execute` 捕获是 CodeWhale 结构化输出所需；CLI 走 spawn(Inherit) 不受影响（§6.5） |
 | Drop 杀子语义偏离 std（仅 has_deny 才杀） | 安全默认（不杀则子进程下次 deny 永久阻塞）；文档写明 |
 | worker 每沙箱 1 线程 | 栈 256KB；生命周期确定性 join（§6.4） |
 | 孙进程继承 1/2 不退出 → drain 挂起 | 与 std::process 同病；文档注明，不在此阶段解 |
@@ -490,7 +513,7 @@ dirs 移除）。A 的「两条消息」被 C 的合并消息取代；B 的「wa
 | `src/child.rs` | NEW：`run_to_output()` + 私有辅助 |
 | `src/linux/mod.rs` | `LinuxChild` / `spawn` 全流程（precompute 迁移、socketpair 条件扩 `\|\| ns.pid`、SO_PASSCRED、recv_hello、worker 按值收 fd）/ Drop |
 | `src/linux/child_setup.rs` | `ChildIo` POD / `setpgid`+dup2（seccomp 前）/ `send_hello`（seccomp 后，`send_fd` 支持 `fd=-1`） |
-| `src/main.rs` | `cmd_run` 回打 + `timed_out`→124 + SIGINT/SIGTERM 转发 |
+| `src/main.rs` | `cmd_run`：`spawn(Inherit)` 流式 + `timed_out`→124 + SIGINT/SIGTERM 转发（§6.5） |
 | `src/config.rs` | `expand_tilde` 用 `$HOME`；`from_flag_args` 加 `#[cfg(feature="cli")]` |
 | `Cargo.toml` | `[features] cli`；`clap`/`dirs` optional；`[[bin]] required-features` |
 | `tests/spawn_test.rs` / `tests/leak_test.rs` | 上述测试 |

@@ -106,6 +106,10 @@ Sandbox::execute(spec) = spawn(spec, Piped) + wait_timeout(spec.timeout)  // 行
 
 `execute` 改为捕获 stdout/stderr 后，`cmd_run` 需把捕获输出打印回终端（stdout/stderr 分别写，保持现有交互不变）。
 
+> **修正（2026-08-14，评审修订）**：cmd_run **不走 `execute` 捕获**，改走 `spawn(StdioConfig::Inherit)`
+> 保持流式 + 交互 stdin（CLI 是给人用的门面；库 `execute` 捕获服务 CodeWhale 结构化输出）。
+> 详见 `design-spawn-api.md` §6.5。
+
 ### 0.6 feature 门控
 
 ```toml
@@ -264,7 +268,7 @@ enum ShellChild {
 | `src/lib.rs` | `CommandOutput` + `CommandSpec.with_stdin` + `StdioConfig` + `SandboxChild` + `Sandbox::spawn` |
 | `src/linux/mod.rs` | `execute` 拆为 spawn+wait；USER_NOTIF worker 生命周期接入 `SandboxChild`；超时强制 |
 | `src/linux/child_setup.rs` | `setpgid(0,0)` + stdio dup2 + business-pid SCM_RIGHTS 回传 |
-| `src/main.rs` | `cmd_run` 打印捕获输出 |
+| `src/main.rs` | `cmd_run` 走 `spawn(Inherit)` 流式 + SIGINT/SIGTERM 转发（修订，见 §0.5 注记） |
 | `Cargo.toml` | feature 门控 `cli`/`profile`（default 保留两者） |
 | `tests/*` | 0.7 新增测试 + 全量回归 |
 
