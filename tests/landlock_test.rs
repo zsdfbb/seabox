@@ -132,7 +132,8 @@ fn verify_landlock_active() -> bool {
         args: vec!["-c".to_string(), "echo probe > probe_file".to_string()],
         cwd: dir_path,
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -211,7 +212,8 @@ fn workspace_write_allows_write() {
         args: vec!["-c".to_string(), "echo ok > test.txt".to_string()],
         cwd: dir_path.clone(),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -249,7 +251,8 @@ fn full_access_bypasses_landlock() {
         args: vec!["-c".to_string(), "echo ok > test.txt".to_string()],
         cwd: dir_path.clone(),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -295,7 +298,8 @@ fn read_only_blocks_write() {
         args: vec!["-c".to_string(), "echo ok > test.txt".to_string()],
         cwd: dir_path.clone(),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -342,7 +346,8 @@ fn cli_read_only_blocks_write_with_exit_126() {
         args: vec!["-c".to_string(), "echo blocked > blocked.txt".to_string()],
         cwd: dir_path,
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -396,7 +401,8 @@ fn cli_workspace_write_blocks_write_outside_cwd() {
         args: vec!["-c".to_string(), sh_cmd],
         cwd: dir_path,
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -437,7 +443,8 @@ fn cli_full_access_allows_arbitrary_write() {
         args: vec!["-c".to_string(), sh_cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -528,7 +535,8 @@ fn read_only_allows_read() {
         args: vec!["/etc/passwd".to_string()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -561,7 +569,8 @@ fn workspace_write_allows_write_to_tmp() {
         args: vec!["-c".to_string(), cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -592,7 +601,8 @@ fn workspace_write_allows_read_anywhere() {
         args: vec!["/etc/passwd".to_string()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -654,7 +664,8 @@ fn workspace_write_grants_allow_write_path() {
         args: vec!["-c".to_string(), cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -721,7 +732,8 @@ fn workspace_write_does_not_grant_unlisted_path() {
         args: vec!["-c".to_string(), cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -758,7 +770,8 @@ fn full_access_does_not_intercept_writes() {
         args: vec!["-c".to_string(), cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -797,7 +810,8 @@ fn cli_read_only_allows_read() {
         args: vec!["/etc/passwd".to_string()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -809,8 +823,12 @@ fn cli_read_only_allows_read() {
         "ReadOnly 下读取 /etc/passwd 应成功。exit_code={}",
         output.exit_code
     );
-    // CommandOutput 不含 stdout，故不验证输出内容；
-    // exit_code=0 即可确认读取未被拦截。
+    // CommandOutput 自 spawn API 阶段 0 起含 stdout（`execute` 捕获）；ReadOnly 下
+    // cat 必须真的读到内容（而不只是 exit_code=0）。
+    assert!(
+        !output.stdout.is_empty(),
+        "cat /etc/passwd under ReadOnly must produce stdout"
+    );
 }
 
 // CLI L6：ReadOnly 下写到 /tmp 应失败，验证 RO 语义。
@@ -837,7 +855,8 @@ fn cli_workspace_write_allows_write_to_tmp() {
         args: vec!["-c".to_string(), sh_cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -898,7 +917,8 @@ fn cli_workspace_write_grants_allow_write_path() {
         args: vec!["-c".to_string(), sh_cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -962,7 +982,8 @@ fn cli_workspace_write_does_not_grant_unlisted_path() {
         args: vec!["-c".to_string(), sh_cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -1001,7 +1022,8 @@ fn cli_workspace_write_allows_read_anywhere() {
         args: vec!["/etc/passwd".to_string()],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox
@@ -1031,7 +1053,8 @@ fn cli_full_access_allows_write_to_var_tmp() {
         args: vec!["-c".to_string(), sh_cmd],
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         env: HashMap::new(),
-        timeout: Duration::from_secs(10),
+        stdin: None,
+        timeout: Some(Duration::from_secs(10)),
     };
 
     let (output, _reason) = sandbox

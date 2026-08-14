@@ -6,28 +6,30 @@
 //!
 //! ## 执行流程
 //!
-//! 1. **父进程** 构建 Landlock 规则集、seccomp BPF filter、namespace 配置。
-//! 2. **父进程** 创建 `socketpair(AF_UNIX, SOCK_SEQPACKET)`，得到两端。
+//! 1. **父进程** [`LinuxSandbox::spawn`] 构建 Landlock 规则集、seccomp BPF filter、
+//!    namespace 配置，并在 fork **前**预计算全部 raw 指针参数。
+//! 2. **父进程** 需要时（`has_deny || ns.pid`）创建
+//!    `socketpair(AF_UNIX, SOCK_SEQPACKET)`，并在父端设 `SO_PASSCRED`。
 //! 3. **父进程** `libc::fork()` 创建子进程。
-//! 4. **子进程** 依次执行：
+//! 4. **子进程** 依次执行（`child_setup::enter_child`）：
 //!    - `unshare(namespace_flags)`（创建 user/ipc/net/uts/cgroup 命名空间）
-//!    - `unshare(CLONE_NEWPID)` + `fork()`（PID 命名空间 + reaper，如需要）
-//!    - 环境变量通过 execve envp 参数传递（fork 前预计算）
-//!    - `fchdir()`（工作目录，用 fork 前打开的 O_PATH fd）
-//!    - `prctl(PR_SET_NO_NEW_PRIVS, 1, …)`
-//!    - `write(/proc/self/uid_map + gid_map)`（user ns 映射，如需要）
-//!    - `sethostname()`（UTS 主机名，如需要）
-//!    - `landlock_restrict_self(ruleset_fd, 0)`（Landlock ACL，如规则存在）
-//!    - `seccomp(SECCOMP_SET_MODE_FILTER, NEW_LISTENER, &fprog)`（加载 BPF，返回 listener fd）
-//!    - `sendmsg(SCM_RIGHTS)`（将 listener fd 经 socketpair 传给父进程）
-//!    - `execve(...)`（启动目标程序，envp 指向预计算数组）
-//! 5. **父进程** worker 线程：
-//!    - 从 socketpair 用 `recvmsg(SCM_RIGHTS)` 拿到 listener fd
+//!    - mount namespace 初始化 + `unshare(CLONE_NEWPID)` + double-fork（PID ns）
+//!    - `setpgid(0,0)` + `dup2()` stdio（seccomp 之前）
+//!    - `fchdir()` / `prctl(PR_SET_NO_NEW_PRIVS)` / uid·gid map / loopback / hostname
+//!    - `landlock_restrict_self(ruleset_fd, 0)`
+//!    - `seccomp(SECCOMP_SET_MODE_FILTER, NEW_LISTENER, &fprog)` → listener fd
+//!    - `send_hello`：一次 sendmsg 交付 SCM_RIGHTS(listener 或 -1) + 内核经
+//!      `SO_PASSCRED` 自动附 SCM_CREDENTIALS(business 宿主 pid)（D-A3 合并单消息）
+//!    - 外部 plain BPF + `execve(...)`
+//! 5. **父进程** `recv_hello`（poll ≤2s，有界阻塞）原子解析
+//!    `(listener_fd, business_pid)` → `has_deny` 时按值收 listener fd 并
+//!    spawn USER_NOTIF worker 线程：
 //!    - 循环 `ioctl(SECCOMP_IOCTL_NOTIF_RECV)` 阻塞读拦截通知
-//!    - 捕获 `seccomp_notif.data.{nr,arch}`，记录到 `blocked`
-//!    - 用 `ioctl(SECCOMP_IOCTL_NOTIF_SEND)` 回复 `error = EPERM`，
-//!      让拦截的 syscall 直接以权限错误返回（不进入 syscall 主体）。
-//! 6. **父进程** 在 reap 时从 `siginfo` 拿到 exit_code / 退出原因。
+//!    - 捕获 `seccomp_notif.data.{nr,arch}` 写入共享 `blocked`
+//!    - 用 `ioctl(SECCOMP_IOCTL_NOTIF_SEND)` 回复 `error = EPERM`
+//! 6. **父进程** 组装 [`LinuxChild`]（实现 [`SandboxChildImpl`]）：`wait_pid` 收割
+//!    （pid-ns 下是中间进程 P，阻塞至整树退出）、`kill_pid` = business 宿主 pid
+//!    （SCM_CREDENTIALS；无 pid-ns 时 = fork pid）。
 //! 7. **关键**：USER_NOTIF 下子进程通常**不会**被信号杀死，进程收到
 //!    EPERM 后继续运行并以正常 exit_code 退出（多数 syscall_probe 会
 //!    自行返回 0）。worker 线程把 `(nr, arch)` 写入共享
@@ -44,15 +46,20 @@ pub mod seccomp;
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::io;
 use std::mem::{self, MaybeUninit};
 use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
+use std::process::ExitStatus;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context;
 
 use crate::config::{MountConfig, SandboxConfig};
-use crate::{CommandOutput, CommandSpec, ExitReason, SandboxImpl};
+use crate::{CommandSpec, ExitReason, SandboxChild, SandboxChildImpl, SandboxImpl, StdioConfig};
 
 // ---------------------------------------------------------------------------
 // 常量（不依赖 libc 版本）
@@ -86,13 +93,16 @@ pub struct LinuxSandbox {
 // ---------------------------------------------------------------------------
 
 impl SandboxImpl for LinuxSandbox {
-    /// 在沙箱内执行一条命令。
+    /// 在沙箱内启动一条命令并返回活句柄（非阻塞）。
     ///
-    /// 在**父进程**中构建 Landlock 规则集与 seccomp BPF filter，
-    /// 然后在 `fork()` 后的**子进程**中依次施加命名空间隔离、Landlock ACL、
+    /// 在**父进程**中构建 Landlock 规则集与 seccomp BPF filter，然后在
+    /// `fork()` 后的**子进程**中依次施加命名空间隔离、Landlock ACL、
     /// seccomp BPF filter，并通过 `SECCOMP_RET_USER_NOTIF` 将拦截事件转发到
     /// listener fd，由父进程 worker 线程处理后写入共享 `blocked` 变量。
-    fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput> {
+    ///
+    /// spawn 是**有界阻塞**（设计 D-A4）：`need_sock` 时 `recv_hello` poll ≤2s
+    /// 等子进程 pre-exec 完成，换取 `kill_pid` 确定性（无 kill 竞态）。
+    fn spawn(&self, spec: &CommandSpec, stdio: StdioConfig) -> anyhow::Result<SandboxChild> {
         // ── 步骤 1：构建 Landlock 规则集并取出其 fd ────────────────────
         let ruleset_fd: Option<OwnedFd> = self.prepare_ruleset_fd()?;
         let raw_ruleset_fd: i32 = ruleset_fd.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1);
@@ -135,19 +145,6 @@ impl SandboxImpl for LinuxSandbox {
             Some(s) => PathBuf::from(crate::config::expand_tilde(s)),
             None => spec.cwd.clone(),
         };
-
-        // ── 步骤 4：创建 socketpair（仅 USER_NOTIF 路径需要）────────────
-        let (parent_stream, child_sock) = if has_deny {
-            let (p, c) = create_socketpair()?;
-            (Some(p), Some(c))
-        } else {
-            (None, None)
-        };
-        let child_fd_raw = child_sock.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1);
-        let parent_fd_raw_for_child = parent_stream
-            .as_ref()
-            .map(|fd| fd.as_raw_fd())
-            .unwrap_or(-1);
 
         // ── 计算 namespace 参数 ────────────────────────────────
         let ns = &self.config.namespaces;
@@ -246,7 +243,7 @@ impl SandboxImpl for LinuxSandbox {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("failed to open cwd '{}'", cwd.display()));
         }
-        // SAFETY: cwd_raw 是刚打开的有效 fd；交给 OwnedFd 由 RAII 在 execute 结束时关闭（父进程侧）。
+        // SAFETY: cwd_raw 是刚打开的有效 fd；交给 OwnedFd 由 RAII 在 spawn 结束时关闭（父进程侧）。
         let cwd_fd = unsafe { OwnedFd::from_raw_fd(cwd_raw) };
 
         // ── 解析程序路径（execve 不搜 PATH，需提前解析）──
@@ -273,7 +270,86 @@ impl SandboxImpl for LinuxSandbox {
         let caps_plan =
             caps::resolve_caps(&self.config.capabilities, is_root, effective_user, ns_root);
 
-        // ── 步骤 5：raw fork + 手动 setup ──────────────────────
+        // ── 步骤 4：创建 socketpair（need_sock = has_deny || ns.pid）──
+        let need_sock = has_deny || ns.pid;
+        let (parent_stream, child_sock) = if need_sock {
+            let (p, c) = create_socketpair()?;
+            // 父端 SO_PASSCRED：内核在每次 recvmsg 时自动附 SCM_CREDENTIALS，
+            // 其 pid 按接收者 pid-ns 解释 → 父进程拿到 business 的宿主 pid（D-A2）。
+            let val: libc::c_int = 1;
+            // SAFETY: p 是刚创建的有效 socket fd；setsockopt 为纯 syscall。
+            let r = unsafe {
+                libc::setsockopt(
+                    p.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_PASSCRED,
+                    &val as *const libc::c_int as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            };
+            if r != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("setsockopt(SO_PASSCRED) failed in spawn");
+            }
+            (Some(p), Some(c))
+        } else {
+            (None, None)
+        };
+        let child_fd_raw = child_sock.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1);
+        let parent_fd_raw_for_child = parent_stream
+            .as_ref()
+            .map(|fd| fd.as_raw_fd())
+            .unwrap_or(-1);
+
+        // ── 步骤 5：stdio（Piped → pipe2(O_CLOEXEC)×3；Fd → 调用方 fd；Inherit → -1）──
+        let report_pid: i32 = if need_sock { 1 } else { 0 };
+        let mut child_stdin_fd: i32 = -1;
+        let mut child_stdout_fd: i32 = -1;
+        let mut child_stderr_fd: i32 = -1;
+        let mut parent_stdin: Option<OwnedFd> = None;
+        let mut parent_stdout: Option<OwnedFd> = None;
+        let mut parent_stderr: Option<OwnedFd> = None;
+        // child 侧 pipe fd（fork 后父进程要关掉自己的副本，否则 stdout 读端永不 EOF）。
+        let mut child_pipe_fds: [RawFd; 3] = [-1, -1, -1];
+
+        match stdio {
+            StdioConfig::Inherit => {}
+            StdioConfig::Piped => {
+                let mut p = [0 as RawFd; 2];
+                pipe2(&mut p, libc::O_CLOEXEC)?; // stdin: child read = p[0], parent write = p[1]
+                child_stdin_fd = p[0];
+                // SAFETY: p[1] 是 pipe2 刚创建的有效写端。
+                parent_stdin = Some(unsafe { OwnedFd::from_raw_fd(p[1]) });
+                pipe2(&mut p, libc::O_CLOEXEC)?; // stdout: parent read = p[0], child write = p[1]
+                                                 // SAFETY: p[0] 是 pipe2 刚创建的有效读端。
+                parent_stdout = Some(unsafe { OwnedFd::from_raw_fd(p[0]) });
+                child_stdout_fd = p[1];
+                pipe2(&mut p, libc::O_CLOEXEC)?; // stderr
+                                                 // SAFETY: p[0] 是 pipe2 刚创建的有效读端。
+                parent_stderr = Some(unsafe { OwnedFd::from_raw_fd(p[0]) });
+                child_stderr_fd = p[1];
+                child_pipe_fds = [child_stdin_fd, child_stdout_fd, child_stderr_fd];
+            }
+            StdioConfig::Fd {
+                stdin,
+                stdout,
+                stderr,
+            } => {
+                child_stdin_fd = stdin;
+                child_stdout_fd = stdout;
+                child_stderr_fd = stderr;
+            }
+        }
+
+        let child_io = child_setup::ChildIo {
+            stdin_fd: child_stdin_fd,
+            stdout_fd: child_stdout_fd,
+            stderr_fd: child_stderr_fd,
+            setpgid: 1, // D-A6：business 恒 setpgid(0,0)（在 seccomp 之前）
+            report_pid, // need_sock 时经 send_hello 单发 listener/pid
+        };
+
+        // ── 步骤 6：raw fork + 手动 setup ──────────────────────
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return Err(std::io::Error::last_os_error()).with_context(|| {
@@ -329,43 +405,90 @@ impl SandboxImpl for LinuxSandbox {
                     do_private,
                     caps_plan.requested,
                     caps_plan.flags,
+                    child_io,
                 );
             }
         }
 
-        // ── 父进程 ──
+        // ── 父进程：关子进程侧的 socket 端 + pipe 端 ─────────────
         drop(child_sock);
+        for &fd in &child_pipe_fds {
+            if fd >= 0 {
+                // SAFETY: fd 是本进程 fork 前 pipe2 创建、fork 后不再需要的副本。
+                unsafe { libc::close(fd) };
+            }
+        }
 
-        let blocked = std::sync::Arc::new(std::sync::Mutex::new(None::<(u32, u32)>));
-        let _notif_handle = if let Some(ref parent_stream) = parent_stream {
-            let parent_fd_raw = parent_stream.as_raw_fd();
-            Some(spawn_user_notif_worker(parent_fd_raw, &blocked)?)
+        // ── 步骤 7：recv_hello（有界阻塞 ≤2s）→ (listener_fd, business_host_pid) ──
+        let (listener_fd_opt, business_host_pid): (Option<OwnedFd>, i32) = if need_sock {
+            let parent_sock_raw = parent_stream
+                .as_ref()
+                .expect("need_sock implies parent_stream")
+                .as_raw_fd();
+            match recv_hello(parent_sock_raw) {
+                Ok(hello) => (hello.listener_fd, hello.business_pid),
+                Err(e) => {
+                    // R1：spawn 错误路径清理——hello 未到即失败，fork 已产生子进程，
+                    // 必须 kill + waitpid 尽力收割，防僵尸/孤儿泄漏（pid-ns 下只杀 P，
+                    // A/B 未 send_hello 即 setup 中 _exit，属罕见边角）。
+                    // SAFETY: kill/waitpid 为 async-signal-safe 纯 syscall。
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    let mut status: i32 = 0;
+                    unsafe { libc::waitpid(pid, &mut status, 0) };
+                    return Err(anyhow::Error::new(e))
+                        .with_context(|| format!("child '{}' failed during setup", spec.program));
+                }
+            }
+        } else {
+            (None, pid as i32)
+        };
+
+        // kill_pid：business 宿主 pid（SCM_CREDENTIALS / 无 pid-ns 时 = fork pid）
+        let kill_pid = if ns.pid {
+            business_host_pid
+        } else {
+            pid as i32
+        };
+
+        // ── 步骤 8：has_deny 时 spawn USER_NOTIF worker（按值收 listener fd）──
+        let blocked = Arc::new(Mutex::new(None::<(u32, u32)>));
+        let notif_worker = if has_deny {
+            let listener = listener_fd_opt.ok_or_else(|| {
+                anyhow::anyhow!("spawn: has_deny but no listener fd received in hello")
+            })?;
+            match spawn_user_notif_worker(listener, &blocked) {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    // worker 线程创建失败（罕见资源耗尽）→ 同样尽力收割已 fork 的子进程。
+                    // SAFETY: kill/waitpid 为纯 syscall。
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                    let mut status: i32 = 0;
+                    unsafe { libc::waitpid(pid, &mut status, 0) };
+                    return Err(e).context("spawn: failed to start seccomp worker thread");
+                }
+            }
         } else {
             None
         };
 
-        // waitpid 替代 waitid
-        let mut status: i32 = 0;
-        let r = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if r < 0 {
-            let e = std::io::Error::last_os_error();
-            drop(parent_stream);
-            return Err(e).with_context(|| {
-                format!("waitpid() failed for sandboxed process '{}'", spec.program)
-            });
-        }
-        let exit_code = if libc::WIFEXITED(status) {
-            libc::WEXITSTATUS(status)
-        } else if libc::WIFSIGNALED(status) {
-            128 + libc::WTERMSIG(status)
-        } else {
-            -1
-        };
+        // parent_stream 使命完成（worker 已按值收 listener fd），RAII 关闭。
+        drop(parent_stream);
 
-        let blocked_val = blocked.lock().ok().and_then(|g| *g);
-        Ok(CommandOutput {
-            exit_code,
-            blocked_syscall: blocked_val,
+        // ── 步骤 9：组装 LinuxChild ─────────────────────────────
+        let lc = LinuxChild {
+            wait_pid: pid as i32, // pid-ns 下是中间进程 P，阻塞至整树退出
+            kill_pid,
+            stdout: parent_stdout,
+            stderr: parent_stderr,
+            stdin: parent_stdin,
+            blocked,
+            notif_worker, // Some ⟺ has_deny
+            reaped: None,
+            timed_out: false,
+            process_group: self.config.process_group,
+        };
+        Ok(SandboxChild {
+            inner: Box::new(lc),
         })
     }
 
@@ -427,6 +550,151 @@ impl SandboxImpl for LinuxSandbox {
 
         // ── 正常的程序退出（非零） ─────────────────────────────────
         Program(exit_code)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LinuxChild：平台无关 SandboxChildImpl 的 Linux 实现
+// ---------------------------------------------------------------------------
+
+/// Linux 沙箱子进程的活句柄（实现 [`SandboxChildImpl`]）。
+///
+/// # 字段语义（设计 §4.2 / §5.0）
+///
+/// - `wait_pid`：外层 `waitpid` 目标。pid-ns 下是中间进程 P，阻塞至整树退出。
+/// - `kill_pid`：business 进程宿主 pid（SCM_CREDENTIALS 回传；无 pid-ns 时 = fork pid）。
+/// - `notif_worker`：`Some` ⟺ `has_deny`（无 deny 不 spawn worker，省线程）。
+/// - `reaped`：`None` = 未收割；`Some` = `try_wait`/`wait`/`wait_timeout` 幂等缓存。
+pub struct LinuxChild {
+    wait_pid: i32,
+    kill_pid: i32,
+    stdout: Option<OwnedFd>,
+    stderr: Option<OwnedFd>,
+    stdin: Option<OwnedFd>,
+    blocked: Arc<Mutex<Option<(u32, u32)>>>,
+    notif_worker: Option<UserNotifHandle>,
+    reaped: Option<ExitStatus>,
+    timed_out: bool,
+    process_group: bool,
+}
+
+impl SandboxChildImpl for LinuxChild {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if let Some(es) = self.reaped {
+            return Ok(Some(es)); // 幂等：reaped 后返回缓存
+        }
+        let mut status: i32 = 0;
+        // SAFETY: waitpid(2) 纯 syscall；WNOHANG 不阻塞。
+        let r = unsafe { libc::waitpid(self.wait_pid, &mut status, libc::WNOHANG) };
+        if r == 0 {
+            return Ok(None); // 仍在运行
+        }
+        if r < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // 原始 wait status → std ExitStatus（稳定 API，安全）。
+        let es = ExitStatusExt::from_raw(status);
+        self.reaped = Some(es);
+        Ok(Some(es))
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        if let Some(es) = self.reaped {
+            return Ok(es); // 幂等：wait 两次返回相同 ExitStatus（防 ECHILD）
+        }
+        let mut status: i32 = 0;
+        // SAFETY: waitpid(2) 阻塞收割 wait_pid；pid-ns 下阻塞至 P 退出 = 整树退出。
+        let r = unsafe { libc::waitpid(self.wait_pid, &mut status, 0) };
+        if r < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // 原始 wait status → std ExitStatus（稳定 API，安全）。
+        let es = ExitStatusExt::from_raw(status);
+        self.reaped = Some(es);
+        Ok(es)
+    }
+
+    fn wait_timeout(&mut self, d: Duration) -> io::Result<ExitStatus> {
+        let deadline = std::time::Instant::now() + d;
+        loop {
+            if let Some(es) = self.try_wait()? {
+                return Ok(es);
+            }
+            if std::time::Instant::now() >= deadline {
+                // D-A10 / 评审 R6：到期必杀 + reap，恒有已退出状态（返回 ExitStatus 非 Option）。
+                self.kill()?;
+                let es = self.wait()?;
+                self.timed_out = true;
+                return Ok(es);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        let target = if self.process_group {
+            -self.kill_pid // 组杀：B + 子孙（B setpgid 过，组 = B 及其后代）
+        } else {
+            self.kill_pid
+        };
+        // SAFETY: kill(2) 纯 syscall；SIGKILL 组杀或单杀。
+        let r = unsafe { libc::kill(target, libc::SIGKILL) };
+        if r != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(()); // 组已空 / 进程已死
+            }
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn id(&self) -> u32 {
+        self.kill_pid as u32
+    }
+
+    #[cfg(unix)]
+    fn take_stdout(&mut self) -> Option<OwnedFd> {
+        self.stdout.take()
+    }
+
+    #[cfg(unix)]
+    fn take_stderr(&mut self) -> Option<OwnedFd> {
+        self.stderr.take()
+    }
+
+    #[cfg(unix)]
+    fn take_stdin(&mut self) -> Option<OwnedFd> {
+        self.stdin.take()
+    }
+
+    fn blocked(&self) -> Option<(u32, u32)> {
+        self.blocked.lock().ok().and_then(|g| *g)
+    }
+
+    fn timed_out(&self) -> bool {
+        self.timed_out
+    }
+}
+
+impl Drop for LinuxChild {
+    /// 零泄漏清理（设计 §6.4）：
+    /// - `has_deny && !reaped`：kill + 阻塞收割（必须 kill：不 kill 只关 listener，
+    ///   子进程在下次命中 deny syscall 时永久阻塞）。
+    /// - `!has_deny && !reaped`：`try_wait` 机会收割；仍在跑则放生（std 语义）。
+    /// - 然后 join worker（子死 → listener POLLHUP → 确定性退出，无需超时 detach）。
+    /// - stdout/stderr/stdin `OwnedFd` RAII 自动关。
+    fn drop(&mut self) {
+        let has_deny = self.notif_worker.is_some();
+        if has_deny && self.reaped.is_none() {
+            let _ = self.kill();
+            let _ = self.wait(); // 阻塞收割
+        } else if !has_deny && self.reaped.is_none() {
+            let _ = self.try_wait(); // 机会收割；仍在跑则放生
+        }
+        if let Some(worker) = self.notif_worker.take() {
+            worker.join();
+        }
     }
 }
 
@@ -683,13 +951,23 @@ fn prepare_mount_ops(
 }
 
 // ---------------------------------------------------------------------------
-// socketpair + SCM_RIGHTS helpers
+// socketpair + SCM_RIGHTS/SCM_CREDENTIALS helpers
 // ---------------------------------------------------------------------------
+
+/// `pipe2(2)` 辅助：创建一对 `O_CLOEXEC` 管道。
+fn pipe2(fds: &mut [RawFd; 2], flags: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: pipe2(2) 纯 syscall；fds 长度为 2，flags 为 O_CLOEXEC。
+    let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), flags) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 /// 创建 `socketpair(AF_UNIX, SOCK_SEQPACKET, 0)` 并返回两端 `OwnedFd`。
 ///
 /// 调用方在 fork 后需手动关闭子进程继承的父端（通过其 raw fd），
-/// 子端在子进程完成 `sendmsg(SCM_RIGHTS)` 后显式 `libc::close`。
+/// 子端在子进程完成 `send_hello` 后显式 `libc::close`。
 ///
 /// # 错误
 ///
@@ -709,21 +987,57 @@ fn create_socketpair() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok((parent, child))
 }
 
-/// 从 unix socket 收一个 `SCM_RIGHTS` fd。
+/// 一次 `recvmsg` 原子拿到的完整 hello（SOCK_SEQPACKET 保证消息边界）。
+struct Hello {
+    /// `has_deny` 时 `Some`（seccomp USER_NOTIF listener fd）；bare ping 时为 `None`。
+    listener_fd: Option<OwnedFd>,
+    /// business 进程在宿主命名空间的 pid（内核经 `SO_PASSCRED` 按接收者 pid-ns 翻译）。
+    business_pid: i32,
+}
+
+/// 从 socketpair 父端收 hello（设计 §5.1）：`poll ≤2s` 有界等待，一次 `recvmsg`
+/// 原子解析 SCM_RIGHTS(listener) + SCM_CREDENTIALS(business 宿主 pid)。
 ///
-/// 在父进程侧的 worker 线程调用。阻塞直到对端 sendmsg 或对端关闭
-///（后者让 recvmsg 返回 0 / EAGAIN）。
-///
-/// 返回收到的 fd（>=0）。调用方负责 close。
-fn recv_fd(socket_fd: RawFd) -> std::io::Result<RawFd> {
-    // 接收 1 字节载荷。
+/// `POLLHUP` / EOF / poll 超时 → `Err`（由调用方走 R1 错误路径清理已 fork 的子进程）。
+fn recv_hello(sock: RawFd) -> std::io::Result<Hello> {
+    // ── poll ≤2s 有界等待（D-A4：spawn 有界阻塞，kill_pid 确定性）──
+    let mut pollfd = libc::pollfd {
+        fd: sock,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let r = loop {
+        // SAFETY: poll(2) 纯 syscall；timeout=2000ms。
+        let r = unsafe { libc::poll(&mut pollfd, 1, 2000) };
+        if r < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        break r;
+    };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if r == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "recv_hello: poll timeout waiting for child hello",
+        ));
+    }
+    if pollfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 && pollfd.revents & libc::POLLIN == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "recv_hello: peer closed before sending hello",
+        ));
+    }
+
+    // ── recvmsg：1 字节载荷 + cmsg（SCM_RIGHTS + SCM_CREDENTIALS）──
+    // 缓冲需同时容纳 SCM_RIGHTS（CMSG_SPACE(4)=24B）+ SCM_CREDENTIALS
+    // （CMSG_SPACE(12)=24B）= 48B；64B 足够。
     let mut payload = [0u8; 1];
     let iov = libc::iovec {
         iov_base: payload.as_mut_ptr() as *mut _,
         iov_len: payload.len(),
     };
-
-    let cmsg_space = unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as libc::c_uint) } as usize;
     let mut cmsg_buf = [MaybeUninit::<u8>::uninit(); 64];
 
     let mut msghdr = libc::msghdr {
@@ -732,43 +1046,65 @@ fn recv_fd(socket_fd: RawFd) -> std::io::Result<RawFd> {
         msg_iov: &iov as *const _ as *mut _,
         msg_iovlen: 1,
         msg_control: cmsg_buf.as_mut_ptr() as *mut _,
-        msg_controllen: cmsg_space as _,
+        msg_controllen: cmsg_buf.len(),
         msg_flags: 0,
     };
 
     // SAFETY：msghdr 完整初始化，cmsg 缓冲区对齐且足够大。
-    let n = unsafe { libc::recvmsg(socket_fd, &mut msghdr, 0) };
+    let n = unsafe { libc::recvmsg(sock, &mut msghdr, 0) };
     if n < 0 {
         return Err(std::io::Error::last_os_error());
     }
     if n == 0 {
-        // 对端关闭 → 没有 fd。
+        // 对端关闭 → 没有 hello。
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
-            "recvmsg returned 0: peer closed without sending fd",
+            "recvmsg returned 0: peer closed without hello",
         ));
     }
 
-    // 取出 cmsg 中的 fd。
-    // SAFETY：recvmsg 已写入 msghdr.msg_controllen；用 CMSG_FIRSTHDR
-    // 拿到第一条 cmsg，类型必须是 SCM_RIGHTS。
+    let mut listener_fd: Option<OwnedFd> = None;
+    let mut business_pid: Option<i32> = None;
+
+    // SAFETY：recvmsg 已写入 msghdr.msg_controllen；按 cmsg 链遍历。
+    // 顺序无关——SCM_RIGHTS 与 SCM_CREDENTIALS 原子到达，一次解析。
     unsafe {
-        let cmsg_ptr = libc::CMSG_FIRSTHDR(&msghdr);
-        if cmsg_ptr.is_null() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "recvmsg: no cmsg header",
-            ));
+        let mut cmsg_ptr = libc::CMSG_FIRSTHDR(&msghdr);
+        while !cmsg_ptr.is_null() {
+            let cmsg = &*cmsg_ptr;
+            if cmsg.cmsg_level == libc::SOL_SOCKET {
+                match cmsg.cmsg_type {
+                    SCM_RIGHTS => {
+                        let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *const RawFd;
+                        let fd = std::ptr::read(data_ptr);
+                        // fd >= 0 才有实际 listener（bare ping 传 -1）。
+                        if fd >= 0 {
+                            // SAFETY: fd 是内核刚打开的 listener 副本，移交给 OwnedFd。
+                            listener_fd = Some(OwnedFd::from_raw_fd(fd));
+                        }
+                    }
+                    libc::SCM_CREDENTIALS => {
+                        let cred = libc::CMSG_DATA(cmsg_ptr) as *const libc::ucred;
+                        business_pid = Some((*cred).pid as i32);
+                    }
+                    _ => {}
+                }
+            }
+            cmsg_ptr = libc::CMSG_NXTHDR(&msghdr, cmsg_ptr);
         }
-        if (*cmsg_ptr).cmsg_level != libc::SOL_SOCKET || (*cmsg_ptr).cmsg_type != SCM_RIGHTS {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "recvmsg: cmsg is not SCM_RIGHTS",
-            ));
-        }
-        let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *const RawFd;
-        Ok(std::ptr::read(data_ptr))
     }
+
+    let business_pid = business_pid.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "recv_hello: no SCM_CREDENTIALS in hello (SO_PASSCRED missing?)",
+        )
+    })?;
+
+    Ok(Hello {
+        listener_fd,
+        business_pid,
+    })
 }
 
 /// 父进程 USER_NOTIF worker 的生命周期句柄。
@@ -776,16 +1112,13 @@ fn recv_fd(socket_fd: RawFd) -> std::io::Result<RawFd> {
 /// 通过 [`spawn_user_notif_worker`] 创建。
 ///
 /// worker 线程在子进程退出、listener fd 收到 POLLHUP 后自然退出。
-/// 调用 [`UserNotifHandle::shutdown`] 可提前唤醒 worker 阻塞的 `poll`，
-/// [`UserNotifHandle::join`] 等待 worker 线程退出并清理资源。
-/// 若未手动 join，worker 线程在句柄 drop 时 detach。
-#[allow(dead_code)]
+/// [`UserNotifHandle::join`] 等待 worker 线程退出并清理资源；
+/// 由 [`LinuxChild`] 的 `Drop` 在 kill + reap 后调用（子死 → POLLHUP → 确定性退出）。
 struct UserNotifHandle {
     /// worker 线程句柄。`join()` 取走后置 None 防止重复 join。
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
-#[allow(dead_code)]
 impl UserNotifHandle {
     /// 等待 worker 线程退出。
     ///
@@ -802,86 +1135,78 @@ impl UserNotifHandle {
 ///
 /// # 参数
 ///
-/// * `parent_sock_raw` —— socketpair 父端的 raw fd。fork 后子进程
-///   通过 `sendmsg(SCM_RIGHTS)` 把 listener fd 发到这里。worker 在
-///   自己闭包里调用 `recv_fd(parent_sock_raw)` 拿 listener。
+/// * `listener` —— seccomp USER_NOTIF listener fd（`recv_hello` 已按值收下，
+///   SCM_RIGHTS 送达）。worker 直接在 `poll(listener, -1)` 中等待
+///   notification 或 POLLHUP。
 /// * `blocked` —— 共享 `(nr, arch)` 状态；worker 把每次拦截的 syscall
-///   信息写进去，主线程在 `waitpid` 后读。
+///   信息写进去，主线程在 reap 后读。
 ///
-/// worker 在 `poll(listener_fd, -1)` 中等待 notification 或 POLLHUP。
-/// 子进程退出 → listener fd POLLHUP → worker 自然退出。
+/// worker 栈 256KB（设计 D-A13 资源基线）。子进程退出 → listener fd
+/// POLLHUP → worker 自然退出。
 fn spawn_user_notif_worker(
-    parent_sock_raw: RawFd,
-    blocked: &std::sync::Arc<std::sync::Mutex<Option<(u32, u32)>>>,
+    listener: OwnedFd,
+    blocked: &Arc<Mutex<Option<(u32, u32)>>>,
 ) -> std::io::Result<UserNotifHandle> {
-    let blocked_for_worker = std::sync::Arc::clone(blocked);
+    let blocked_for_worker = Arc::clone(blocked);
 
-    let worker = std::thread::spawn(move || {
-        // 1) 收 listener fd。阻塞直到子进程 sendmsg 或子进程已死。
-        let listener_fd_raw = match recv_fd(parent_sock_raw) {
-            Ok(fd) => fd,
-            Err(_e) => {
-                // 子进程未发出 listener 就退出。
-                return;
-            }
-        };
-        // SAFETY：listener_fd_raw 是 recv_fd 返回的有效 fd，
-        // 移交给 OwnedFd 后由 RAII 在闭包退出时关闭。
-        let listener_fd = unsafe { OwnedFd::from_raw_fd(listener_fd_raw) };
+    let worker = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let listener_fd = listener;
 
-        // 2) 主循环：poll(listener_fd, -1)，等待 notification 或 POLLHUP。
-        loop {
-            let mut pollfd = libc::pollfd {
-                fd: listener_fd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY：timeout=-1 表示永久阻塞直到就绪或被信号打断。
-            let r = unsafe { libc::poll(&mut pollfd, 1, -1) };
-            if r < 0 {
-                break;
-            }
-            if pollfd.revents == 0 {
-                continue;
-            }
+            // 主循环：poll(listener_fd, -1)，等待 notification 或 POLLHUP。
+            loop {
+                let mut pollfd = libc::pollfd {
+                    fd: listener_fd.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY：timeout=-1 表示永久阻塞直到就绪或被信号打断。
+                let r = unsafe { libc::poll(&mut pollfd, 1, -1) };
+                if r < 0 {
+                    break;
+                }
+                if pollfd.revents == 0 {
+                    continue;
+                }
 
-            // listener_fd 可读 → 处理一条 notification。
-            let mut notif: seccomp::seccomp_notif = unsafe { mem::zeroed() };
-            let r = unsafe {
-                libc::ioctl(
-                    listener_fd.as_raw_fd(),
-                    seccomp::SECCOMP_IOCTL_NOTIF_RECV,
-                    &mut notif,
-                )
-            };
-            if r != 0 {
-                break;
-            }
+                // listener_fd 可读 → 处理一条 notification。
+                let mut notif: seccomp::seccomp_notif = unsafe { mem::zeroed() };
+                let r = unsafe {
+                    libc::ioctl(
+                        listener_fd.as_raw_fd(),
+                        seccomp::SECCOMP_IOCTL_NOTIF_RECV,
+                        &mut notif,
+                    )
+                };
+                if r != 0 {
+                    break;
+                }
 
-            // 记录 (nr, arch) 到共享变量。
-            if let Ok(mut g) = blocked_for_worker.lock() {
-                *g = Some((notif.data.nr as u32, notif.data.arch));
-            }
+                // 记录 (nr, arch) 到共享变量。
+                if let Ok(mut g) = blocked_for_worker.lock() {
+                    *g = Some((notif.data.nr as u32, notif.data.arch));
+                }
 
-            // 回复 EPERM（不调用 syscall 主体）。
-            let resp = seccomp::seccomp_notif_resp {
-                id: notif.id,
-                val: 0,
-                error: libc::EPERM,
-                flags: 0,
-            };
-            let r = unsafe {
-                libc::ioctl(
-                    listener_fd.as_raw_fd(),
-                    seccomp::SECCOMP_IOCTL_NOTIF_SEND,
-                    &resp,
-                )
-            };
-            if r != 0 {
-                break;
+                // 回复 EPERM（不调用 syscall 主体）。
+                let resp = seccomp::seccomp_notif_resp {
+                    id: notif.id,
+                    val: 0,
+                    error: libc::EPERM,
+                    flags: 0,
+                };
+                let r = unsafe {
+                    libc::ioctl(
+                        listener_fd.as_raw_fd(),
+                        seccomp::SECCOMP_IOCTL_NOTIF_SEND,
+                        &resp,
+                    )
+                };
+                if r != 0 {
+                    break;
+                }
             }
-        }
-    });
+        })?;
 
     Ok(UserNotifHandle {
         worker: Some(worker),

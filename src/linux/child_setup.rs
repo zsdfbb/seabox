@@ -51,6 +51,36 @@ pub struct ExtFilterDesc {
     pub len: usize,
 }
 
+/// 子进程 IO / 进程组行为描述（阶段 0 spawn API）。
+///
+/// 全部字段为 POD 标量，`Copy` / `repr(C)`，可安全跨 fork 按值传给子进程。
+/// `Default` = 「全关」：不 setpgid、不 dup2、不 send_hello——行为与现状等价。
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ChildIo {
+    /// stdin 重定向目标 fd（-1 = 不修改）。
+    pub stdin_fd: i32,
+    /// stdout 重定向目标 fd（-1 = 不修改）。
+    pub stdout_fd: i32,
+    /// stderr 重定向目标 fd（-1 = 不修改）。
+    pub stderr_fd: i32,
+    /// 0 = 否；1 = `setpgid(0,0)`（business 进程自建进程组）。
+    pub setpgid: i32,
+    /// 0 = 否；1 = send_hello（seccomp 装好后发 listener / bare ping，`has_deny || ns.pid` 时）。
+    pub report_pid: i32,
+}
+impl Default for ChildIo {
+    fn default() -> Self {
+        Self {
+            stdin_fd: -1,
+            stdout_fd: -1,
+            stderr_fd: -1,
+            setpgid: 0,
+            report_pid: 0,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // enter_child
 // ---------------------------------------------------------------------------
@@ -61,15 +91,19 @@ pub struct ExtFilterDesc {
 /// 1. `unshare()` 创建常规 namespace（user/mnt/ipc/net/uts/cgroup）
 /// 2. mount namespace 初始化（make_private + do_mounts）
 /// 3. double-fork + reaper（PID namespace 需要）
-/// 4. `fchdir()`（工作目录，用 fork 前打开的 O_PATH fd）
-/// 5. `prctl(PR_SET_NO_NEW_PRIVS)`
-/// 6. uid/gid map 写入 `/proc/self/uid_map` 等（user ns 需要）
-/// 7. `sethostname()`（UTS 需要）
-/// 8. `landlock_restrict_self()`（Landlock 规则需要）
-/// 9. capability 收窄（`capset` / bounding / ambient，仅 `--cap-*` 指定时）
-/// 10. seccomp USER_NOTIF filter 安装 + `sendmsg(SCM_RIGHTS)`
-/// 11. 外部 plain BPF filter 安装
-/// 12. `execve()` 启动目标程序
+/// 4. `setpgid(0,0)` + `dup2()` stdio（`child_io` 指定时才做；seccomp 之前，
+///    避免用户 deny 清单误伤 setpgid/dup2）
+/// 5. `fchdir()`（工作目录，用 fork 前打开的 O_PATH fd）
+/// 6. `prctl(PR_SET_NO_NEW_PRIVS)`
+/// 7. uid/gid map 写入 `/proc/self/uid_map` 等（user ns 需要）
+/// 8. `configure_loopback()`（netns 需要）
+/// 9. `sethostname()`（UTS 需要）
+/// 10. `landlock_restrict_self()`（Landlock 规则需要）
+/// 11. capability 收窄（`capset` / bounding / ambient，仅 `--cap-*` 指定时）
+/// 12. seccomp USER_NOTIF filter 安装 + `sendmsg(SCM_RIGHTS)` 传 listener fd
+/// 13. `send_hello()`（`child_io.report_pid` 指定时才做）+ 统一关闭 socket fd
+/// 14. 外部 plain BPF filter 安装
+/// 15. `execve()` 启动目标程序
 ///
 /// # Safety
 ///
@@ -85,6 +119,7 @@ pub struct ExtFilterDesc {
 /// - `caps_requested` / `caps_flags` 是父进程 fork 前经 [`caps::resolve_caps`]
 ///   解析好的目标位图与原语 flags；`caps_flags != 0` 时会在 seccomp 安装前调用
 ///   零堆的 [`caps::apply_caps`] 收窄 capability
+/// - `child_io` 是按值传入的 [`ChildIo`]（POD Copy），无指针，无堆
 ///
 /// 此函数永远不返回：要么通过 `execve` 转为目标程序，要么 `_exit`。
 #[allow(clippy::too_many_arguments)]
@@ -116,6 +151,7 @@ pub unsafe fn enter_child(
     do_private: bool,
     caps_requested: u64,
     caps_flags: u8,
+    child_io: ChildIo,
 ) {
     // ── 第 1 步：创建常规 namespace（不含 PID）────────────────────
     let mut user_ns_active = user_ns_active;
@@ -183,7 +219,27 @@ pub unsafe fn enter_child(
         // ── PID 2（业务进程）：继续后续 setup ──
     }
 
-    // ── 第 3 步：fchdir ────────────────────────────────────────
+    // ── 第 4 步：setpgid + dup2 stdio（child_io 指定时才做）────
+    // 放在 seccomp 之前：避免用户 `--seccomp-deny-nr` 清单误伤 setpgid/dup2。
+    // 全部为纯 syscall，栈上 i32，零堆。
+    if child_io.setpgid != 0 {
+        // man:setpgid(2)：business 进程自建进程组，供父侧 kill(-pgid) 组杀。
+        if libc::setpgid(0, 0) != 0 {
+            libc::_exit(1);
+        }
+    }
+    // man:dup2(2)：各 fd >= 0 才执行；src != dst 时 dup2 自动清目标 CLOEXEC。
+    if child_io.stdin_fd >= 0 && libc::dup2(child_io.stdin_fd, 0) < 0 {
+        libc::_exit(1);
+    }
+    if child_io.stdout_fd >= 0 && libc::dup2(child_io.stdout_fd, 1) < 0 {
+        libc::_exit(1);
+    }
+    if child_io.stderr_fd >= 0 && libc::dup2(child_io.stderr_fd, 2) < 0 {
+        libc::_exit(1);
+    }
+
+    // ── 第 5 步：fchdir ────────────────────────────────────────
     // 用 fork 前父进程打开的 O_PATH 目录 fd，避免 userns 内 uid 无法遍历
     // 宿主路径（如 750 家目录）导致的 chdir EACCES（root + userns 场景）。
     if libc::fchdir(cwd_fd) != 0 {
@@ -191,12 +247,12 @@ pub unsafe fn enter_child(
     }
     libc::close(cwd_fd);
 
-    // ── 第 4 步：prctl(PR_SET_NO_NEW_PRIVS) ────────────────────
+    // ── 第 6 步：prctl(PR_SET_NO_NEW_PRIVS) ────────────────────
     if libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
         libc::_exit(1);
     }
 
-    // ── 第 5 步：uid/gid map ──────────────────────────────────
+    // ── 第 7 步：uid/gid map ──────────────────────────────────
     if user_ns_active && uid_map_len > 0 && gid_map_len > 0 {
         // SAFETY: 调用方保证 uid_map / gid_map 有效且长度正确。
         let uid_slice = std::slice::from_raw_parts(uid_map, uid_map_len);
@@ -207,19 +263,19 @@ pub unsafe fn enter_child(
         namespaces::write_ns_file(b"/proc/self/gid_map\0", gid_slice).ok();
     }
 
-    // ── 第 6 步：loopback 配置（netns 中 lo UP + 127.0.0.1/8）───
+    // ── 第 8 步：loopback 配置（netns 中 lo UP + 127.0.0.1/8）───
     if configure_lo {
         super::net::configure_loopback();
     }
 
-    // ── 第 7 步：sethostname ──────────────────────────────────
+    // ── 第 9 步：sethostname ──────────────────────────────────
     if hostname_len > 0 {
         // SAFETY: 调用方保证 hostname 有效且长度正确。
         let host_slice = std::slice::from_raw_parts(hostname, hostname_len);
         namespaces::set_hostname(host_slice).ok();
     }
 
-    // ── 第 7 步：landlock_restrict_self ──────────────────────
+    // ── 第 10 步：landlock_restrict_self ──────────────────────
     if ruleset_fd >= 0 {
         // SAFETY: man:landlock_restrict_self(2)；ruleset_fd 是调用方传来的
         // 有效 fd，flags=0 是唯一合法值。
@@ -230,34 +286,68 @@ pub unsafe fn enter_child(
         libc::close(ruleset_fd);
     }
 
-    // ── 第 8 步：capability 收窄（capset / bounding / ambient）──
+    // ── 第 11 步：capability 收窄（capset / bounding / ambient）──
     if caps_flags != 0 {
         // SAFETY: 调用方保证 caps_requested / caps_flags 是 resolve_caps 的
         // 合法输出；apply_caps 零堆、async-signal-safe，失败以 _exit(1) 收场。
         super::caps::apply_caps(caps_requested, caps_flags);
     }
 
-    // ── 第 9 步：seccomp USER_NOTIF filter ──────────────────
+    // ── 第 12 步：seccomp USER_NOTIF filter ─────────────────
+    // listener_fd：已安装 USER_NOTIF filter 时有效（>=0）；否则 -1。
+    // 不再立即 close child/parent_sock_fd——统一由 send_hello（或 report_pid=0
+    // 时的等价关闭路径）在下方处理。
+    let mut listener_fd: i32 = -1;
     if bpf_filter_len > 0 {
         // SAFETY: 调用方保证 bpf_filter_ptr 有效且长度为 bpf_filter_len。
         let filter = std::slice::from_raw_parts(bpf_filter_ptr, bpf_filter_len);
-        let listener_fd = match seccomp::install_user_notif_filter(filter) {
+        listener_fd = match seccomp::install_user_notif_filter(filter) {
             Ok(fd) => fd,
             Err(_) => libc::_exit(1),
         };
-        // sendmsg SCM_RIGHTS：把 listener fd 发给父进程
-        if send_fd(child_sock_fd, listener_fd).is_err() {
+        // sendmsg SCM_RIGHTS：把 listener fd 发给父进程。
+        // report_pid == 0 的默认路径（行为不变）：listener 经此 send_fd 发送，
+        // 父侧 worker 从 socketpair 收 fd。
+        // report_pid != 0 时（D-A3 合并单消息）：listener 只经下方 send_hello
+        // 单发（连同 SCM_CREDENTIALS 一次 sendmsg），**此处跳过**避免双发。
+        if child_io.report_pid == 0 && send_fd(child_sock_fd, listener_fd).is_err() {
             libc::close(listener_fd);
             libc::close(child_sock_fd);
+            if parent_sock_fd >= 0 {
+                libc::close(parent_sock_fd);
+            }
+            libc::_exit(1);
+        }
+        // 成功时不在此 close——见上方注释
+    }
+
+    // ── 第 13 步：send_hello（seccomp 之后、plain BPF 之前）──
+    // report_pid != 0：一次 sendmsg 把 listener fd（无 deny 时传 -1，bare ping）
+    // 发给父进程；父端 SO_PASSCRED 自动附加 SCM_CREDENTIALS（Task 3 用），
+    // child 零额外工作。发送后统一 close 两个 sock fd。
+    if child_io.report_pid != 0 && child_sock_fd >= 0 {
+        let hello_fd = if bpf_filter_len > 0 { listener_fd } else { -1 };
+        if send_hello(child_sock_fd, hello_fd).is_err() {
+            libc::close(child_sock_fd);
+            if parent_sock_fd >= 0 {
+                libc::close(parent_sock_fd);
+            }
             libc::_exit(1);
         }
         libc::close(child_sock_fd);
         if parent_sock_fd >= 0 {
             libc::close(parent_sock_fd);
         }
+    } else if bpf_filter_len > 0 {
+        // report_pid=0（本任务默认，行为不变）：seccomp 成功分支原本在此 close
+        // 两个 sock fd，保持现状语义。
+        libc::close(child_sock_fd);
+        if parent_sock_fd >= 0 {
+            libc::close(parent_sock_fd);
+        }
     }
 
-    // ── 第 10 步：外部 plain BPF filter ─────────────────────
+    // ── 第 14 步：外部 plain BPF filter ─────────────────────
     if ext_filters_len > 0 {
         // SAFETY: 调用方保证 ext_filters 有效且长度为 ext_filters_len，
         // 且每个 desc.data 指向一个长度 >= desc.len 的 sock_filter 数组。
@@ -274,7 +364,7 @@ pub unsafe fn enter_child(
         }
     }
 
-    // ── 第 11 步：execve ─────────────────────────────────────
+    // ── 第 15 步：execve ─────────────────────────────────────
     // SAFETY: exec_path、argv、envp 由调用方保证有效且格式正确。
     // man:execve(2)
     libc::execve(exec_path, argv, envp);
@@ -327,9 +417,13 @@ fn do_reaper(business_pid: libc::pid_t) -> i32 {
 ///
 /// 载荷是一个 magic byte `0x42`，让父端能确认消息完整收到。
 ///
+/// `fd_to_send < 0` 时是 **bare ping**：不发 SCM_RIGHTS cmsg，只发载荷
+///（`msg_control = null` / `msg_controllen = 0`）。SO_PASSCRED 仍会由接收方
+/// 自动附加 SCM_CREDENTIALS。
+///
 /// # Safety
 ///
-/// `socket_fd` 必须是一个有效的 Unix socket fd，`fd_to_send` 必须
+/// `socket_fd` 必须是一个有效的 Unix socket fd；`fd_to_send >= 0` 时必须
 /// 是一个有效的、要在对端打开的 fd。
 fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), ()> {
     // iovec 描述载荷（1 字节 magic）。
@@ -344,36 +438,46 @@ fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), ()> {
     let cmsg_space =
         unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as libc::c_uint) } as usize;
     let mut cmsg_buf = [MaybeUninit::<u8>::uninit(); 64];
-    if cmsg_space > cmsg_buf.len() {
-        return Err(());
-    }
+
+    // fd_to_send < 0（bare ping）：不发 cmsg，只发载荷。
+    let (msg_control, msg_controllen): (*mut libc::c_void, usize) = if fd_to_send < 0 {
+        (std::ptr::null_mut(), 0)
+    } else {
+        if cmsg_space > cmsg_buf.len() {
+            return Err(());
+        }
+        (cmsg_buf.as_mut_ptr() as *mut libc::c_void, cmsg_space)
+    };
 
     let msghdr = libc::msghdr {
         msg_name: std::ptr::null_mut(),
         msg_namelen: 0,
         msg_iov: &iov as *const _ as *mut _,
         msg_iovlen: 1,
-        msg_control: cmsg_buf.as_mut_ptr() as *mut _,
-        msg_controllen: cmsg_space as _,
+        msg_control,
+        msg_controllen,
         msg_flags: 0,
     };
 
-    // 把 cmsghdr 写入缓冲区头部，data 区域写 fd。
+    // 仅当需要传 fd 时写 cmsg 头（bare ping 跳过）。
     // SAFETY:
     // - `cmsg_buf` 至少 `CMSG_SPACE(sizeof(fd))` 字节。
     // - `CMSG_FIRSTHDR` 返回的指针位于该缓冲区内，对齐正确。
-    unsafe {
-        let cmsg_ptr = libc::CMSG_FIRSTHDR(&msghdr);
-        if cmsg_ptr.is_null() {
-            return Err(());
-        }
-        (*cmsg_ptr).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg_ptr).cmsg_type = SCM_RIGHTS;
-        (*cmsg_ptr).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as libc::c_uint) as _;
+    if fd_to_send >= 0 {
+        unsafe {
+            let cmsg_ptr = libc::CMSG_FIRSTHDR(&msghdr);
+            if cmsg_ptr.is_null() {
+                return Err(());
+            }
+            (*cmsg_ptr).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg_ptr).cmsg_type = SCM_RIGHTS;
+            (*cmsg_ptr).cmsg_len =
+                libc::CMSG_LEN(std::mem::size_of::<RawFd>() as libc::c_uint) as _;
 
-        // 把 fd 写到 cmsg data 区域。
-        let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *mut RawFd;
-        std::ptr::write(data_ptr, fd_to_send);
+            // 把 fd 写到 cmsg data 区域。
+            let data_ptr = libc::CMSG_DATA(cmsg_ptr) as *mut RawFd;
+            std::ptr::write(data_ptr, fd_to_send);
+        }
     }
 
     // SAFETY: msghdr 完整初始化，iovec 与 cmsg 都在缓冲区有效期内。
@@ -382,4 +486,15 @@ fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+/// 发送 hello 消息（hello 协议原语，类型化封装）。
+///
+/// 一次 sendmsg 原子交付：载荷 1B `0x42` + SCM_RIGHTS（`listener_fd`）。
+/// `listener_fd = -1` 时是 bare ping：不发 SCM_RIGHTS cmsg，只发载荷。
+/// SCM_CREDENTIALS 由父端 SO_PASSCRED 自动附加（Task 3 用），child 零额外工作。
+///
+/// 零堆：复用 [`send_fd`] 的栈上 POD 路径。
+fn send_hello(socket_fd: RawFd, listener_fd: RawFd) -> Result<(), ()> {
+    send_fd(socket_fd, listener_fd)
 }

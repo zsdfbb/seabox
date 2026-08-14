@@ -7,9 +7,15 @@
 //! - 命令规格：[`CommandSpec`]、[`CommandOutput`]
 
 use std::collections::HashMap;
+use std::io;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 use std::time::Duration;
 
+pub mod child;
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod config;
 pub mod profile;
@@ -258,6 +264,29 @@ pub fn check_capabilities() -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// StdioConfig
+// ---------------------------------------------------------------------------
+
+/// 子进程标准流配置。恰好覆盖 CodeWhale 三条执行路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StdioConfig {
+    /// 继承父进程的 0/1/2，零额外 fd。
+    Inherit,
+    /// 内部 pipe；通过 `SandboxChild::take_stdout` / `take_stderr` / `take_stdin` 取出。
+    Piped,
+    /// 预开 fd → dup2；`-1` 表示不修改对应标准流。
+    Fd {
+        stdin: i32,
+        stdout: i32,
+        stderr: i32,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// CommandSpec
+// ---------------------------------------------------------------------------
+
 /// 在沙箱内运行的完整命令规格。
 ///
 /// 这是 [`Sandbox::execute`] 的输入。
@@ -286,7 +315,12 @@ pub struct CommandSpec {
     /// 命令使用的环境变量。
     pub env: HashMap<String, String>,
     /// 命令在被杀死前的最大运行时间（wall-clock）。
-    pub timeout: Duration,
+    ///
+    /// `None` 表示不强制超时（库默认，向后兼容）；CLI 显式传 `Some(...)`。
+    pub timeout: Option<Duration>,
+    /// 同步便捷 stdin 数据（`execute` 内部写入；`spawn` 忽略）。
+    /// `None` 表示不写 stdin，子进程读端立即 EOF。
+    pub stdin: Option<Vec<u8>>,
 }
 
 impl Default for CommandSpec {
@@ -296,7 +330,8 @@ impl Default for CommandSpec {
             args: Vec::new(),
             cwd: PathBuf::from("/"),
             env: HashMap::new(),
-            timeout: Duration::from_secs(30),
+            timeout: None,
+            stdin: None,
         }
     }
 }
@@ -320,9 +355,23 @@ impl CommandSpec {
         self
     }
 
-    /// 设置超时时间。
+    /// 设置超时时间。`Some(d)` 表示 `d` 后强制杀死命令。
+    ///
+    /// 对应 CLI 的 `--timeout`。
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// 清除超时（`timeout = None`），命令可无限运行。
+    pub fn with_no_timeout(mut self) -> Self {
+        self.timeout = None;
+        self
+    }
+
+    /// 设置同步便捷 stdin 数据（`execute` 内部写入；`spawn` 忽略）。
+    pub fn with_stdin(mut self, data: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(data.into());
         self
     }
 
@@ -357,11 +406,116 @@ impl CommandSpec {
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
     /// 命令的退出码。
+    ///
+    /// 约定：正常退出为 0..255；被信号杀死时为 `128 + signal`（D-A1，保持 `i32`）。
     pub exit_code: i32,
     /// 若黑名单 syscall 被 seccomp USER_NOTIF 拦截，由 worker 线程
     /// 通过 listener fd 上报的 `(syscall_nr, arch)`。
     /// `None` 表示未被拦截。
     pub blocked_syscall: Option<(u32, u32)>,
+    /// 命令 stdout 的全部内容（`execute` 捕获）。
+    pub stdout: Vec<u8>,
+    /// 命令 stderr 的全部内容（`execute` 捕获）。
+    pub stderr: Vec<u8>,
+    /// 命令是否因超时被强制杀死。
+    pub timed_out: bool,
+}
+
+// ---------------------------------------------------------------------------
+// SandboxChild + SandboxChildImpl
+// ---------------------------------------------------------------------------
+
+/// 平台无关的沙箱子进程句柄。刻意镜像 `std::process::Child`。
+///
+/// 通过 [`Sandbox::spawn`] 获得。所有方法透传内部实现
+/// （`SandboxChildImpl`，bin crate 访问不到其 trait 方法，故在此暴露公开 wrapper）。
+pub struct SandboxChild {
+    inner: Box<dyn SandboxChildImpl>,
+}
+
+impl SandboxChild {
+    /// 非阻塞收割（`WNOHANG`）。已收割后幂等返回缓存状态。
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.inner.try_wait()
+    }
+
+    /// 阻塞收割至进程退出。
+    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.inner.wait()
+    }
+
+    /// 有界等待 `d`；到期强制 `kill()` + 收割后返回已退出状态（超时被强杀为 137），
+    /// 是否超时用 [`timed_out`](Self::timed_out) 查询。
+    pub fn wait_timeout(&mut self, d: Duration) -> io::Result<ExitStatus> {
+        self.inner.wait_timeout(d)
+    }
+
+    /// 杀死进程（`process_group` 时 `kill(-pgid)`，否则 `kill(pid)`）。ESRCH 视为 Ok。
+    pub fn kill(&mut self) -> io::Result<()> {
+        self.inner.kill()
+    }
+
+    /// business 进程在宿主命名空间的 pid（= kill 目标）。
+    pub fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    /// 取出 stdout 读端 fd（`Piped` 时）。
+    #[cfg(unix)]
+    pub fn take_stdout(&mut self) -> Option<OwnedFd> {
+        self.inner.take_stdout()
+    }
+
+    /// 取出 stderr 读端 fd（`Piped` 时）。
+    #[cfg(unix)]
+    pub fn take_stderr(&mut self) -> Option<OwnedFd> {
+        self.inner.take_stderr()
+    }
+
+    /// 取出 stdin 写端 fd（`Piped` 时）。
+    #[cfg(unix)]
+    pub fn take_stdin(&mut self) -> Option<OwnedFd> {
+        self.inner.take_stdin()
+    }
+
+    /// 若黑名单 syscall 被 seccomp USER_NOTIF 拦截，返回 `(syscall_nr, arch)`。
+    pub fn blocked(&self) -> Option<(u32, u32)> {
+        self.inner.blocked()
+    }
+
+    /// 进程是否因超时被强制杀死。
+    pub fn timed_out(&self) -> bool {
+        self.inner.timed_out()
+    }
+}
+
+/// 沙箱子进程句柄的后端抽象（内部 trait，与 [`SandboxImpl`] 同构，
+/// 为 macOS Phase 3 提供扩展点）。
+pub(crate) trait SandboxChildImpl: Send {
+    /// 非阻塞收割（WNOHANG）；已收割后幂等返回缓存。
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    /// 阻塞收割至进程退出。
+    fn wait(&mut self) -> io::Result<ExitStatus>;
+    /// 有界等待 `d`；到期强制 kill + reap 后返回已退出状态（超时被强杀为 137），
+    /// 是否超时用 [`timed_out`](Self::timed_out) 查询。
+    fn wait_timeout(&mut self, d: Duration) -> io::Result<ExitStatus>;
+    /// 杀死进程（`process_group` 时 `kill(-pgid)`，否则 `kill(pid)`）。
+    fn kill(&mut self) -> io::Result<()>;
+    /// business 进程在宿主命名空间的 pid（= kill 目标）。
+    fn id(&self) -> u32;
+    /// 取出 stdout 读端 fd（`Piped` 时）。
+    #[cfg(unix)]
+    fn take_stdout(&mut self) -> Option<OwnedFd>;
+    /// 取出 stderr 读端 fd（`Piped` 时）。
+    #[cfg(unix)]
+    fn take_stderr(&mut self) -> Option<OwnedFd>;
+    /// 取出 stdin 写端 fd（`Piped` 时）。
+    #[cfg(unix)]
+    fn take_stdin(&mut self) -> Option<OwnedFd>;
+    /// 若黑名单 syscall 被 seccomp USER_NOTIF 拦截，返回 `(syscall_nr, arch)`。
+    fn blocked(&self) -> Option<(u32, u32)>;
+    /// 进程是否因超时被强制杀死。
+    fn timed_out(&self) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,8 +527,16 @@ pub struct CommandOutput {
 /// 各实现使用目标平台上可用的内核机制来提供文件系统隔离与系统调用过滤
 ///（例如 Linux 上的 Landlock + seccomp、macOS 上的 Seatbelt）。
 trait SandboxImpl: Send + Sync {
-    /// 在沙箱限制下执行命令，并返回其输出。
-    fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput>;
+    /// 在沙箱限制下启动命令，返回活句柄（非阻塞）。
+    fn spawn(&self, spec: &CommandSpec, stdio: StdioConfig) -> anyhow::Result<SandboxChild>;
+
+    /// 在沙箱限制下执行命令并捕获全部输出（阻塞至退出）。
+    ///
+    /// 默认实现：`spawn(Piped)` 后委托 [`crate::child::run_to_output`]
+    ///（平台无关的 drain + 超时 + kill 组合，写一次）。
+    fn execute(&self, spec: &CommandSpec) -> anyhow::Result<CommandOutput> {
+        crate::child::run_to_output(self.spawn(spec, StdioConfig::Piped)?, spec)
+    }
 
     /// 将已完成命令的退出码归类为一个 [`ExitReason`]，
     /// 区分沙箱拒绝（Landlock、seccomp 等）、正常程序退出与内部错误。
@@ -418,12 +580,26 @@ impl Sandbox {
         Ok(Self { config, inner })
     }
 
+    /// 启动命令并返回活句柄（非阻塞）。`stdio` 决定子进程 0/1/2 的接法。
+    pub fn spawn(&self, spec: &CommandSpec, stdio: StdioConfig) -> anyhow::Result<SandboxChild> {
+        self.inner.spawn(spec, stdio)
+    }
+
     /// 执行命令，返回 `(CommandOutput, ExitReason)`。
+    ///
+    /// 捕获全部输出（`Piped`）；命令超时被强制杀死时 `reason` 为
+    /// [`ExitReason::InternalError`]（`CommandOutput.timed_out` 消歧）。
     pub fn execute(&self, spec: &CommandSpec) -> anyhow::Result<(CommandOutput, ExitReason)> {
         let output = self.inner.execute(spec)?;
-        let reason = self
+        let mut reason = self
             .inner
             .classify_exit(output.exit_code, output.blocked_syscall);
+        if output.timed_out {
+            reason = ExitReason::InternalError(format!(
+                "command '{}' timed out (wall-clock deadline exceeded)",
+                spec.program
+            ));
+        }
         Ok((output, reason))
     }
 

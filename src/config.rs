@@ -34,6 +34,12 @@ pub struct SandboxConfig {
     pub seccomp_filter_bytes: Vec<Vec<u8>>,
     /// capability 权限操作（`--cap-add`/`--cap-drop`/`--cap-inherit`）。
     pub capabilities: CapabilityConfig,
+    /// 是否以进程组粒度 kill（`kill(-pgid)` vs `kill(pid)`）。默认 `true`。
+    ///
+    /// D-A7：`setpgid(0,0)` 在子进程**恒**执行（D-A6），本字段只控制
+    /// `SandboxChild::kill` 的目标粒度——`true` 时组杀（连带子孙进程），
+    /// `false` 时只杀 business 进程本身。
+    pub process_group: bool,
 }
 
 impl Default for SandboxConfig {
@@ -48,6 +54,7 @@ impl Default for SandboxConfig {
             seccomp_deny_nrs: vec![],
             seccomp_filter_bytes: vec![],
             capabilities: CapabilityConfig::default(),
+            process_group: true,
         }
     }
 }
@@ -300,6 +307,15 @@ impl SandboxConfig {
         self
     }
 
+    /// 设置 kill 粒度：`true` = 进程组杀（`kill(-pgid)`，默认）；`false` = 单杀（`kill(pid)`）。
+    ///
+    /// 无论取值，子进程**恒** `setpgid(0,0)`（D-A6）；本方法只控制
+    /// `SandboxChild::kill` 是否连同子孙进程一起回收。
+    pub fn with_process_group(mut self, on: bool) -> Self {
+        self.process_group = on;
+        self
+    }
+
     /// 创建沙箱实例（返回 [`crate::Sandbox`]）。
     pub fn into_sandbox(self) -> anyhow::Result<crate::Sandbox> {
         crate::Sandbox::from_config(self)
@@ -309,6 +325,7 @@ impl SandboxConfig {
     ///
     /// 等价于 `seabox run <args> -- true` 的沙箱配置部分；`args` 中可含
     /// `@file` token 与 `{workspace}`/`~` 占位符（与 CLI 一致）。
+    #[cfg(feature = "cli")]
     pub fn from_flag_args<I, S>(args: I) -> anyhow::Result<Self>
     where
         I: IntoIterator<Item = S>,
@@ -542,6 +559,10 @@ impl CapabilityConfig {
 ///
 /// 若 `$HOME` 未设置（在 Linux/macOS 上罕见），则原样返回字符串。
 ///
+/// **设计接受的行为变更（D-A11）**：本函数在父进程侧展开，改用 `$HOME` 环境变量
+/// 而非 `dirs::home_dir()`（后者在无 HOME 时回退 getpwuid）。损失 getpwuid fallback
+/// 属设计决策——`dirs` 移出核心路径（仅 `cli` feature 使用），`$HOME` 在 Agent 场景恒有。
+///
 /// # 示例
 ///
 /// ```
@@ -556,7 +577,7 @@ impl CapabilityConfig {
 /// ```
 pub fn expand_tilde(s: &str) -> String {
     if s.starts_with("~/") || s == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = std::env::var_os("HOME") {
             return s.replacen('~', &home.to_string_lossy(), 1);
         }
     }

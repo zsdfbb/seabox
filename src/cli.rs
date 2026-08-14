@@ -619,6 +619,8 @@ fn build_config(
         seccomp_filter_bytes: vec![],
         // --cap-add/--cap-drop/--cap-inherit 在 parse_run 中按 CLI 顺序应用。
         capabilities: crate::config::CapabilityConfig::default(),
+        // D-A7：CLI 默认组杀（process_group=true）。
+        process_group: true,
     })
 }
 
