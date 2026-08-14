@@ -40,7 +40,7 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 - ✅ **Phase 2**：7 种命名空间隔离（User/IPC/Mount/PID/Net/UTS/Cgroup，含 `--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`）+ 动态 seccomp（`--seccomp-deny-nr` / `--seccomp-filter-fd`）+ 网络隔离与 loopback 控制（`--allow-network` / `--share-net`）
 - ⏸️ **Phase 2b**：IP 级网络过滤（原计划 eBPF aya，已搁置待 Phase 4 时重新评估）
 - 🚧 **Phase 3**：macOS Seatbelt 支持
-- 🚧 **Phase 4**：CodeWhale 集成 + HTTP API（2026-08 调研后 HTTP API 暂缓——HTTP sandbox API 是"远程 microVM/容器沙箱"市场的标配，与本项目"本地 OS 沙箱"定位不符，详见 `docs/development-phases.md`）
+- 🚧 **Phase 4**：CodeWhale 集成（**集成对象：个人 fork 版 CodeWhale**，入口 `Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`，origin `zsdfbb/CodeWhale_seabox`，非上游）+ HTTP API（2026-08 调研后 HTTP API 暂缓——HTTP sandbox API 是"远程 microVM/容器沙箱"市场的标配，与本项目"本地 OS 沙箱"定位不符，详见 `docs/development-phases.md`）
 
 ## 文档索引
 
@@ -59,7 +59,7 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 | [docs/adr/0006-spawn-api-business-pid.md](docs/adr/0006-spawn-api-business-pid.md) | ADR 006：spawn API + business-pid 回传（SCM_CREDENTIALS） |
 | [docs/arch/phase2-wrapup/](docs/arch/phase2-wrapup/) | Phase 2 收尾设计：`--allow-network` 方案、四方案对比、ADR、review |
 | [docs/arch/mount-namespace/](docs/arch/mount-namespace/) | mount ns 设计：`--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`、ADR、review |
-| [docs/arch/codewhale-integration/](docs/arch/codewhale-integration/) | Phase 4：CodeWhale 库级集成（context + design + 阶段 0 spawn 详细设计 + ADR 006，2026-08-14） |
+| [docs/arch/codewhale-integration/](docs/arch/codewhale-integration/) | Phase 4：CodeWhale（个人 fork）库级集成（context + design + 阶段 0 spawn 详细设计 + ADR 006，2026-08-14） |
 | [docs/learned.md](docs/learned.md) | 跨会话经验教训（踩坑记录） |
 | [CONTEXT.md](CONTEXT.md) | 领域词汇表 |
 
@@ -86,7 +86,7 @@ seabox/
 │   ├── arch/
 │   │   ├── phase2-wrapup/      # --allow-network 设计
 │   │   ├── mount-namespace/    # mount ns 设计（--unshare-mnt / --bind / --ro-bind / --tmpfs）
-│   │   └── codewhale-integration/  # Phase 4：CodeWhale 库级集成（context + design）
+│   │   └── codewhale-integration/  # Phase 4：CodeWhale（个人 fork）库级集成（context + design）
 │   ├── design-final/
 │   │   └── seccomp-deny-message.md
 │   ├── design-plans/completed/
@@ -232,3 +232,4 @@ echo "$out"
 ## 外部引用
 
 - 优先在 ${HOME}/OpenSrc 下查看第三方项目源码。
+- Phase 4 集成对象为 **CodeWhale 个人 fork**（`Integration/CodeWhale` → `${HOME}/Develop/CodeWhale_seabox`，origin `zsdfbb/CodeWhale_seabox`），非上游仓库——集成、删除后端、改测试均只针对该 fork。
