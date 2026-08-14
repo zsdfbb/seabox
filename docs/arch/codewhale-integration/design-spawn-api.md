@@ -33,7 +33,7 @@ seabox 从「阻塞 `execute`」扩展到「非阻塞 `spawn` + 活句柄」，�
 | D-A7 | kill 粒度 + CLI 回归 | `process_group` 配置（默认 **true**）控制 `kill()` 用 `kill(-pgid)` 还是 `kill(pid)`；cmd_run 加 **SIGINT/SIGTERM 转发**到子进程组，消解 setpgid 导致的 Ctrl+C 回归 | 候选 B 提出回归 + 融合 |
 | D-A8 | 超时表达 | `CommandSpec.timeout: Duration → Option<Duration>`，**默认 `None`**（库向后兼容不强制）；CLI 显式传 `Some(30s)`（`--timeout` 现有默认）。新增 `with_no_timeout()` | 候选 B |
 | D-A9 | SandboxChild 形态 | 公开具体类型 + 私有 `SandboxChildImpl` trait（与 `Sandbox`/`SandboxImpl` 同构，macOS Phase 3 扩展点） | 候选 B/C |
-| D-A10 | wait_timeout 语义 | 到期即 `kill(-kill_pid)` + reap + 返回 `Some(137)` + `timed_out()`。**不返回 None**（None 语义混淆「仍运行」） | 候选 A |
+| D-A10 | wait_timeout 语义 | 到期即 `kill(-kill_pid)` + reap + 返回 `ExitStatus`（137）+ `timed_out()`；签名 `io::Result<ExitStatus>`（评审 R6 简化：到期必杀+reap，恒有已退出状态，`Option` 的 None 语义混淆） | 候选 A + 评审 |
 | D-A11 | feature 门控 | `cli = ["dep:clap","dep:dirs"]`；`anyhow` 核心常开；`expand_tilde` 改 `$HOME`（dirs 移出核心路径）；`from_flag_args` 加 `#[cfg(feature="cli")]`；`profile` 归核心 | 候选 A 深入分析 |
 | D-A12 | execute 捕获 | 边读边 wait 单线程 drain loop（非阻塞 pipe + poll + WNOHANG），**0 额外线程**；stdin 非阻塞写+poll | 候选 C |
 | D-A13 | worker 生命周期 | worker 仅 `has_deny` 时存在（每 child ≤1 线程，栈 256KB）；Drop：`has_deny && !reaped` → kill+reap → join worker（子死 → listener POLLHUP → 确定性退出） | 候选 A/C |
@@ -134,8 +134,9 @@ pub struct SandboxChild { inner: Box<dyn SandboxChildImpl> }
 pub(crate) trait SandboxChildImpl: Send {
     fn try_wait(&mut self)      -> io::Result<Option<ExitStatus>>; // WNOHANG；reaped 后幂等
     fn wait(&mut self)          -> io::Result<ExitStatus>;
-    fn wait_timeout(&mut self, d: Duration) -> io::Result<Option<ExitStatus>>;
-    //  到期 → kill(-kill_pid) + reap → Some(status)；timed_out() 查询
+    fn wait_timeout(&mut self, d: Duration) -> io::Result<ExitStatus>;
+    //  到期 → kill(-kill_pid) + reap → 返回已退出状态（超时被强杀为 137）；timed_out() 查询
+    //  评审采纳：返回 ExitStatus 而非 Option——到期必杀+reap，恒有已退出状态，None 语义混淆
     fn kill(&mut self)          -> io::Result<()>;  // process_group ? kill(-pgid) : kill(pid)
     fn id(&self)                -> u32;             // business 宿主 pid（= kill 目标）
     fn take_stdout(&mut self)   -> Option<OwnedFd>;
@@ -168,20 +169,44 @@ trait SandboxImpl: Send + Sync {  // 仍私有
 
 ```rust
 pub struct LinuxChild {
-    wait_pid: i32,                           // 外层 waitpid 目标（pid-ns 下是中间进程 P）
-    kill_pid: i32,                           // business 宿主 pid（SCM_CREDENTIALS / = wait_pid）
+    wait_pid: i32,                    // 外层 waitpid 目标（pid-ns 下是中间进程 P，阻塞至整树退出）
+    kill_pid: i32,                    // business 宿主 pid（kill 目标；SCM_CREDENTIALS / 无 pid-ns 时 = wait_pid）
     stdout: Option<OwnedFd>, stderr: Option<OwnedFd>, stdin: Option<OwnedFd>,
     blocked: Arc<Mutex<Option<(u32, u32)>>>,
-    notif_worker: Option<UserNotifHandle>,   // 仅 has_deny
-    reaped: bool, last_status: ExitStatus,
-    timed_out: bool, process_group: bool,
-    has_deny: bool,
+    notif_worker: Option<UserNotifHandle>,  // Some ⟺ has_deny（无 deny 无 worker，省线程）
+    reaped: Option<ExitStatus>,       // None = 未收割；Some = try_wait/wait/wait_timeout 幂等返回缓存
+    timed_out: bool,
+    process_group: bool,
 }
 ```
+
+> **字段精简（评审采纳）**：`reaped: Option<ExitStatus>` 合并原 `reaped: bool` + `last_status: ExitStatus`
+> （消除"两个字段必须一致"的不变量，wait 幂等 = 直接返回 Some）；删除 `has_deny: bool`
+> （由 `notif_worker.is_some()` 推出，消除第二处不变量）。`kill_pid: i32` 非 Option——有界阻塞
+> spawn（A4）保证构造时已确定。
 
 ---
 
 ## 5. child_setup 改动清单（ADR 0003 零堆内，纯 syscall）
+
+### 5.0 进程树心智模型（所有 pid 语义的源头）
+
+```
+宿主 pid-ns                    新 pid-ns（仅 ns.pid 时）
+─────────                      ─────────
+seabox 父进程
+   │ fork
+   P ─── 等 A 退出，转发退出码     ← wait_pid：父进程 waitpid 收割目标（阻塞至整树退出）
+   │ fork (unshare NEWPID 后)
+   A（PID 1）reaper ─ 等 B 退出    ← ns init；杀它 = 内核 SIGKILL 整个 ns（备用机制）
+   │ fork
+   B（PID 2）business ── exec     ← kill_pid：SCM_CREDENTIALS 回传 B 的宿主 pid
+                 setpgid(0,0) 建组 → kill(-kill_pid) 杀 B + 子孙，reaper 链逐层转发退出码
+```
+
+> **三个 pid，各司其职**：`wait_pid`（P，父进程收割对象）、`kill_pid`（B，杀进程树的目标）、
+> business pid（B 在宿主 ns 的 pid，由内核经 SO_PASSCRED 隐式翻译，B 自己不知道）。
+> 无 pid-ns 时 P ≡ B ≡ 直接 fork 子进程，三者合一。
 
 新增 POD（全 `Copy` / `repr(C)`，零堆）：
 
@@ -212,6 +237,28 @@ pub struct ChildIo {
 > （候选 A/B 一致）。hello 在 seccomp **之后**：listener fd 此时才存在；且 plain BPF 之前发，
 > 即便后续 plain BPF 杀进程，spawn 也先成功、wait 再收割（与现状「listener 先发、plain BPF 后装」一致）。
 
+### 5.1 hello 协议原语（评审采纳：类型化封装，调用方不碰 cmsg）
+
+内核「SO_PASSCRED 隐式附 pid」是对调用方不透明的魔法——封装成有名字的类型，协议布局单点定义：
+
+```rust
+/// 一次 recvmsg 原子拿到的完整 hello（SOCK_SEQPACKET 保证边界）。
+struct Hello {
+    listener_fd: Option<OwnedFd>,   // has_deny 时 Some（seccomp USER_NOTIF listener）
+    business_pid: i32,              // B 的宿主 pid（内核按接收者 pid-ns 翻译，来自 SCM_CREDENTIALS）
+}
+
+// child_setup（零堆，child 侧）：payload 1B 0x42 + SCM_RIGHTS(listener 或 -1)；
+// SCM_CREDENTIALS 由父端 SO_PASSCRED 自动附加，child 零额外工作
+fn send_hello(sock: RawFd, listener_fd: i32) -> Result<(), ()>;   // listener_fd=-1 = bare ping
+
+// linux/mod（父侧）：poll ≤2s 等 hello；EOF/poll 超时 → 错误（见 R1 清理）
+fn recv_hello(sock: RawFd) -> io::Result<Hello>;
+```
+
+> 原有 `recv_fd`（返回单个 fd）被 `recv_hello` 取代；`send_fd` 复用为 `send_hello`（已支持 `fd=-1`）。
+> `blocked`/`kill_pid` 的解析集中在此一处，消息协议不散落。
+
 ---
 
 ## 6. 关键数据流
@@ -227,13 +274,19 @@ pub struct ChildIo {
 5. 子进程 enter_child(..., child_io, child_sock_fd, parent_sock_fd_for_child, ...)
 6. 父进程：drop(child_sock)；关 3 个 child 侧 pipe 端
    → recv_hello(parent_stream, poll≤2s)：
-       ├─ POLLHUP/EOF → Err("child exited during setup")（镜像 std::process exec 失败检测）
+       ├─ POLLHUP/EOF/超时 → 清理已 fork 的子进程：kill(wait_pid, SIGKILL) + waitpid(wait_pid) 尽力收割
+       │                      → Err("child exited during setup")（镜像 std::process exec 失败检测）
        └─ 成功 → (listener_fd_opt, business_host_pid)
            kill_pid = business_host_pid（无 pid-ns 时 = fork 返回值，无 hello 也已知）
            wait_pid = fork 返回值（pid-ns 下是中间进程 P）
            → has_deny ? spawn_user_notif_worker(listener_fd_by_value, &blocked) : 无
            → 关 parent_sock；组装 LinuxChild
 ```
+
+> **R1 — spawn 错误路径清理（评审采纳）**：hello 未到即 spawn 失败时，`fork()` 已产生子进程，
+> 必须 kill + waitpid 收割，否则僵尸/孤儿泄漏。pid-ns 下 `kill(wait_pid)` 只杀 P，A/B 可能孤儿
+> （但 B 尚未 send_hello 即未 exec，setup 中会 `_exit`），属罕见边角——「尽力而为」，文档注明。
+> 补测试：`spawn_setup_failure_no_leak`（触发 setup 失败 → 断言无僵尸）。
 
 **spawn 是「有界阻塞」**（结构性的：hello 只在 B 完成 pre-exec setup 后到达），但比现状
 （阻塞到整个进程退出）轻得多，且换来 `kill_pid` 确定性 + kill 无竞态。文档注明。
@@ -244,7 +297,7 @@ pub struct ChildIo {
 try_wait()      : 1×waitpid(wait_pid, WNOHANG)；reap 成功 → 缓存 ExitStatus、置 reaped；幂等
 wait()          : 阻塞 waitpid(wait_pid)；pid-ns 下阻塞至 P 退出 = 整树退出
 wait_timeout(d) : loop { try_wait → Some? 返回
-                          now ≥ deadline → kill() + wait() 收割 → timed_out=true → 返回 Some(137)
+                          now ≥ deadline → kill() + wait() 收割 → timed_out=true → 返回 ExitStatus(137)
                           sleep ~10ms }
 kill()          : process_group ? kill(-kill_pid, SIGKILL) : kill(kill_pid, SIGKILL)
                   pid-ns 下 kill(-B_pgid)：B setpgid 过，组 = B + 子孙；
@@ -281,6 +334,29 @@ Drop(LinuxChild)：
   has_deny                         → join worker（子死 → listener POLLHUP → 确定性返回，无需超时 detach）
   OwnedFd RAII 关 3 个 pipe fd
 ```
+
+### 6.5 cmd_run 信号转发（R2 评审采纳：职责限 CLI，不进库）
+
+`process_group` 默认 true 使子进程脱离终端前台组 → Ctrl+C 只杀 seabox 自己。cmd_run 转发
+SIGINT/SIGTERM 到子进程组。**实现机制（不引新依赖，手写，全 async-signal-safe）**：
+
+```rust
+static CHILD_PGID: AtomicI32 = AtomicI32::new(0);   // 当前正在执行子进程的 kill_pid（进程组 id）
+
+extern "C" fn forward(sig: libc::c_int) {
+    let pgid = CHILD_PGID.load(Ordering::Relaxed);
+    if pgid > 0 { unsafe { libc::kill(-pgid, sig) }; }   // 转发到子进程组
+    unsafe { libc::_exit(128 + sig); }                    // seabox 也退出（GNU 惯例）
+}
+
+// cmd_run：execute 前 signal(SIGINT/ SIGTERM, forward)；spawn 后存、wait 后清 CHILD_PGID
+```
+
+- `kill` / `_exit` / `AtomicI32::load` 均 async-signal-safe；handler 内无锁、无堆。
+- **职责边界**：信号处理**只在 cmd_run（CLI 层）**。库的 `execute` 是同步阻塞、可被多线程
+  并发调用——全局 `CHILD_PGID` 在并发下会串扰，故库不碰信号；调用方（CodeWhale）用自己的
+  tokio 信号机制（`tokio::signal`）处理。
+- 备选 `signal-hook` 依赖：为 3 个信号引依赖略重，倾向手写；若日后需要多 handler 再引入。
 
 ---
 
@@ -324,7 +400,7 @@ CodeWhale：`seabox = { path = "../seabox", default-features = false }`，零 CL
 | spawn 阻塞 | kill_pid 可能为 None，kill() 内轮询 50ms | （未明确） | **有界阻塞 ≤2s 等 hello** | **C**（kill_pid 确定性，kill 无竞态） |
 | setpgid | 无条件 | **process_group flag**（默认 false 保 CLI） | 无条件 | **融合**：恒 setpgid + process_group 默认 true + cmd_run 信号转发 |
 | 超时表达 | Duration + ZERO 哨兵 | **Option\<Duration\>** + with_no_timeout | Duration（默认实现未展开） | **B**（无哨兵，库默认 None 兼容） |
-| wait_timeout | 到期 kill+reap → Some(137)+flag | 到期返回 None **不 kill**（wait-timeout crate 惯例） | 到期 kill+reap → Some | **A**（贴近 design.md 超时强制，None 语义混淆） |
+| wait_timeout | 到期 kill+reap → Some(137)+flag | 到期返回 None **不 kill**（wait-timeout crate 惯例） | 到期 kill+reap → Some | **A** + 评审 R6 简化 `ExitStatus` |
 | execute 实现 | 读线程 + join（简单） | drain 线程（run_to_output） | **非阻塞 drain loop，0 线程** | **C**（每 execute 省 2 线程） |
 | 超时 kill 粒度 | kill(-pgid) | kill(-pgid) | kill(-pgid) | 一致 |
 | Drop 语义 | kill_on_drop 开关（默认 true） | kill-on-drop + join | has_deny→kill+reap+join；无 deny→放生 | **C**（无 deny 不杀，最贴 std） |
@@ -360,12 +436,15 @@ dirs 移除）。A 的「两条消息」被 C 的合并消息取代；B 的「wa
 | execute_timeout_enforced | `with_timeout(200ms)` + `sleep 2` → timed_out、exit 137 |
 | with_no_timeout_runs | timeout None + `sleep 1` → 正常完成 |
 | spawn_try_wait_wait_idempotent | 先 None 后 Some；二次 try_wait 幂等（CodeWhale 轮询关键） |
+| wait_twice_idempotent | `wait()` 两次返回相同 ExitStatus（reaped 缓存，防 ECHILD） |
+| **spawn_setup_failure_no_leak** | 触发子进程 setup 失败 → spawn 返回 Err + 无僵尸/孤儿（R1 错误路径清理） |
 | wait_timeout_kills_group | `sleep 100` + 100ms → kill + 组回收 |
 | **pid_ns_id_is_business_host_pid** | `ns.pid=true`：`id()` == /proc 反推的 B 宿主 pid（SCM_CREDENTIALS 正确性） |
 | **pid_ns_kill_group** | `sh -c 'sleep 30 & wait'` → kill() → 整树回收、wait 快速返回 |
 | stdio_fd_inject | `StdioConfig::Fd` 预开 pipe fd → 子进程 0/1/2 生效 |
 | take_fds_manual_read | Piped + take_stdout → 手动 Read（CodeWhale reader-thread 模式） |
 | spawn_blocked_classify | `--seccomp-deny-nr` + syscall_probe → blocked() Some → classify_exit Denied |
+| **cmd_run_sigint_forward** | （CLI 二进制）`run -- sleep 100`，发 SIGINT → 子进程组被收 + seabox 退出（§6.5） |
 | **scm_creds_container_caveat** | （阶段 3）若在容器 pid-ns 内运行 seabox，验证 kill() 语义 |
 
 ### 新增 `tests/leak_test.rs`（资源专项）

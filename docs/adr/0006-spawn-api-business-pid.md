@@ -30,7 +30,11 @@ seabox 是**进程内 fork + pre_exec** 模型，无法委托 `std::process::Com
 | A7 | kill 粒度 | `process_group` 配置（默认 **true**）：`kill()` = `kill(-pgid)`（组）或 `kill(pid)`（单）；cmd_run 转发 SIGINT/SIGTERM 到子进程组 |
 | A8 | 超时表达 | `CommandSpec.timeout: Duration → Option<Duration>`，默认 `None`（库向后兼容）；CLI 显式 `Some(30s)`；新增 `with_no_timeout()` |
 | A9 | SandboxChild 形态 | 公开具体类型 + 私有 `SandboxChildImpl` trait（与 `Sandbox`/`SandboxImpl` 同构，macOS Phase 3 扩展点） |
-| A10 | wait_timeout 语义 | 到期即 `kill(-kill_pid)` + reap → 返回 `Some(137)` + `timed_out()`（**不返回 None**） |
+| A10 | wait_timeout 语义 | 到期即 `kill(-kill_pid)` + reap → 返回 `ExitStatus`（137）+ `timed_out()`；签名 `io::Result<ExitStatus>` |
+
+> **修订（2026-08-14 评审 R6）**：A10 返回形状由 `Option<ExitStatus>` 简化为 `ExitStatus`——
+> 到期必杀 + reap，恒有已退出状态，`Option` 的 None 语义（"仍运行"）与「超时被杀」冲突。
+> 语义不变，仅形状简化。见 `design-spawn-api.md` §4.1 + `review.md` R6。
 | A11 | feature 门控 | `cli = ["dep:clap","dep:dirs"]`；`anyhow` 核心；`expand_tilde` 改 `$HOME`（dirs 移出核心路径）；`from_flag_args` 加 `#[cfg(feature="cli")]` |
 | A12 | execute 捕获 | 边读边 wait 单线程 drain loop（非阻塞 pipe + poll + WNOHANG），0 额外线程 |
 | A13 | worker 生命周期 | worker 仅 `has_deny` 时存在；Drop：`has_deny && !reaped` → kill+reap → join worker（确定性退出） |
@@ -64,8 +68,9 @@ seabox 是**进程内 fork + pre_exec** 模型，无法委托 `std::process::Com
    持私有 trait 对象与 `Sandbox`/`SandboxImpl` 完全同构，API 层零污染，成本仅每 child 一个
    `Box<dyn>`（与现有 `Sandbox` 一致）。
 10. **A10（wait_timeout 强制）**：贴近已批准 design.md「超时 → kill(-kill_pid) → reap」。
-   返回 `Some(137)` + `timed_out()` 而非 `None`：None 惯例（wait-timeout crate）表示「仍运行」，
-   与「超时被杀」语义冲突。CodeWhale 轮询用 `try_wait()`（单次 syscall），不需要非杀 wait_timeout。
+   返回 `ExitStatus`(137) + `timed_out()` 而非 `None`：None 惯例（wait-timeout crate）表示「仍运行」，
+   与「超时被杀」语义冲突（评审 R6 进一步简化 Option 形状）。CodeWhale 轮询用 `try_wait()`（单次
+   syscall），不需要非杀 wait_timeout。
 11. **A11（feature 门控）**：唯一挖出 `dirs` 在核心路径（`expand_tilde`）依赖的候选是 A——
    不换 `$HOME` 则 `default-features=false` 仍拉 `dirs`。`anyhow` 被 lib/config/linux 全程使用，
    是核心依赖不可随 cli 走。`profile.rs` 纯 std+anyhow，归核心（不 gate）。
