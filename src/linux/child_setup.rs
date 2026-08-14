@@ -305,6 +305,15 @@ pub unsafe fn enter_child(
             Ok(fd) => fd,
             Err(_) => libc::_exit(1),
         };
+        // 设 CLOEXEC：exec 时自动关闭，防 exec'd 程序继承 sandbox 内部 listener fd。
+        // seccomp(2) NEW_LISTENER 返回的 fd 默认不带 CLOEXEC。
+        // fcntl 是 async-signal-safe、零堆，符合 ADR 0003（fork 后纯 syscall）。
+        // 不影响 SCM_RIGHTS 传 fd：内核复制 fd 时不继承源 fd 的 CLOEXEC 标记，
+        // 父进程 worker 收到的 listener fd 仍正常。
+        let flags = libc::fcntl(listener_fd, libc::F_GETFD);
+        if flags >= 0 {
+            libc::fcntl(listener_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+        }
         // sendmsg SCM_RIGHTS：把 listener fd 发给父进程。
         // report_pid == 0 的默认路径（行为不变）：listener 经此 send_fd 发送，
         // 父侧 worker 从 socketpair 收 fd。

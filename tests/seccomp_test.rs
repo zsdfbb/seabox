@@ -704,3 +704,46 @@ fn deny_nr_normal_command_succeeds() {
         out.stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// fd 卫生：exec 不继承 seccomp USER_NOTIF listener fd
+// ---------------------------------------------------------------------------
+
+/// 回归测试：seccomp USER_NOTIF listener fd 不应被 exec'd 程序继承。
+///
+/// `child_setup` 在 fork 后给 listener fd 设 CLOEXEC（`seccomp(2)` NEW_LISTENER
+/// 返回的 fd 在多款内核上默认不带 CLOEXEC；本机内核已自带，此处属防御性设置，
+/// 保证不依赖内核版本）。若 listener 被继承，`ls -l` 会列出目标
+/// `anon_inode:seccomp notify`（旧内核格式 `anon_inode:[seccomp]`）。
+///
+/// 注意用 `ls -1 /proc/self/fd` 只列数字名、看不到符号链接目标，故这里用 `-l`。
+///
+/// 放在本文件（CLI 子进程形态）而非 spawn_test.rs：CLI 的 listener 存在于每个
+/// `seabox` 子进程内、且是 fork 之后才收到，exec'd `ls` 不会被并行测试进程里的
+/// 其它非 CLOEXEC listener fd 污染，断言稳定。
+#[test]
+fn exec_does_not_inherit_seccomp_listener() {
+    if skip_if_no_seccomp() {
+        return;
+    }
+    let out = run_cli(&[
+        "run",
+        "--seccomp-deny-nr",
+        mount_nr(),
+        "--",
+        "sh",
+        "-c",
+        "ls -l /proc/self/fd",
+    ]);
+    assert_eq!(
+        out.exit_code,
+        Some(0),
+        "sh/ls 不调用被 deny 的 syscall，应正常退出 0。stderr={:?}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("anon_inode"),
+        "exec'd 程序不得继承 seccomp USER_NOTIF listener fd；/proc/self/fd={:?}",
+        out.stdout
+    );
+}

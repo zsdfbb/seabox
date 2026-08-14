@@ -732,3 +732,61 @@ fn cmd_run_sigint_forward() {
         "sleep={sleep_pid} should be gone after SIGINT forward"
     );
 }
+
+// ---------------------------------------------------------------------------
+// S11: 父侧 worker 持有的 seccomp listener fd 不泄漏到 fork 出的子进程
+//      （recvmsg MSG_CMSG_CLOEXEC 回归）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn worker_listener_not_leaked_to_forked_child() {
+    if !seccomp_is_available() {
+        eprintln!("seccomp not available, skipping test");
+        return;
+    }
+    // 步骤 1：spawn 一个带 seccomp deny 的命令。spawn 返回时 recv_hello 已
+    // 同步收到 listener fd（SCM_RIGHTS）并 spawn 了 USER_NOTIF worker 线程，
+    // worker 在 poll(listener, -1) 中持有该 fd（当前在测试进程的 fd 表里）。
+    //
+    // 用长驻进程（sleep）保证子进程在步骤 2 期间仍存活 → worker 仍持有
+    // listener fd（子进程退出后 worker 会因 POLLHUP 自然退出并关闭 fd，
+    // 用短命令 wait 完再检查会引入竞态）。
+    let deny_sandbox =
+        Sandbox::from_config(SandboxConfig::default().with_seccomp_deny_nr(mount_nr()))
+            .expect("create deny sandbox");
+    let mut child = deny_sandbox
+        .spawn(
+            &CommandSpec::default()
+                .with_program("sh")
+                .with_args(["-c", "sleep 30"]),
+            StdioConfig::Piped,
+        )
+        .expect("spawn long-running denied child");
+
+    // 步骤 2：子进程存活期间，第二个 child 由 execute fork 自本测试进程，
+    // 继承测试进程全部 fd（含 worker 持有的 listener fd，修复前非 CLOEXEC）。
+    // exec 时 CLOEXEC 的 fd 自动关闭 → stdout 不应出现 anon_inode:seccomp。
+    // 用 `ls -l`（显示 symlink 目标）而非 `ls -1`（只列数字名，测不出）。
+    let (output, _reason) = make_sandbox()
+        .execute(
+            &CommandSpec::default()
+                .with_program("sh")
+                .with_args(["-c", "ls -l /proc/self/fd"]),
+        )
+        .expect("execute ls /proc/self/fd");
+    assert_eq!(output.exit_code, 0);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("worker_listener_not_leaked_to_forked_child: child fd list:\n{stdout}");
+    assert!(
+        !stdout.contains("anon_inode:seccomp"),
+        "forked child must not inherit worker listener fd:\n{stdout}"
+    );
+
+    // 清理：杀掉长驻子进程并收割（worker 随后因 POLLHUP 自然退出，join 于 Drop）。
+    child.kill().expect("kill");
+    let es = child.wait().expect("wait");
+    eprintln!(
+        "worker_listener_not_leaked_to_forked_child: cleanup exit {:?}",
+        es.code()
+    );
+}

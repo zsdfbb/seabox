@@ -1051,7 +1051,10 @@ fn recv_hello(sock: RawFd) -> std::io::Result<Hello> {
     };
 
     // SAFETY：msghdr 完整初始化，cmsg 缓冲区对齐且足够大。
-    let n = unsafe { libc::recvmsg(sock, &mut msghdr, 0) };
+    // MSG_CMSG_CLOEXEC：SCM_RIGHTS 收到的 listener fd 自动带 FD_CLOEXEC。
+    // 父进程 worker 不 exec 无碍；seabox 库嵌入会 fork 其他子进程的应用时，
+    // 防 worker 持有的 listener fd 经 fork 泄漏到 fork 出的子进程。
+    let n = unsafe { libc::recvmsg(sock, &mut msghdr, libc::MSG_CMSG_CLOEXEC) };
     if n < 0 {
         return Err(std::io::Error::last_os_error());
     }
