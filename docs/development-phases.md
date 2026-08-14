@@ -48,16 +48,27 @@ Phase 2b 原与 Phase 3、4 并行，现明确降级为 Phase 4 的前置依赖�
 - 拒绝检测
 - 跨平台 `Sandbox` enum（`Linux | MacOs | None`）
 
-## Phase 4 — CodeWhale 集成（💡 计划中）
+## Phase 4 — CodeWhale 集成（🚧 进行中）
 
-- adapter → `codewhale::sandbox::SandboxExecutor`
-- HTTP API serve 模式（OpenSandbox 兼容，axum）
-- TOML 配置模板
+以 **crate 依赖（库级）** 方式集成进 CodeWhale，替换并删除 Linux bwrap 后端，
+覆盖前台同步 / 后台非 tty / 后台 tty 三条执行路径。设计见 `docs/arch/codewhale-integration/`。
 
-> **2026-08 决策：HTTP API 暂缓。** 调研结论：
+- [ ] **阶段 0（seabox 库扩展）**：`CommandOutput` 补 stdout/stderr/timed_out；`CommandSpec::with_stdin`；
+      `Sandbox::spawn` + `SandboxChild`（try_wait/wait/wait_timeout/kill/id）+ `StdioConfig`；
+      `child_setup` 加 `setpgid(0,0)` + stdio dup2 + business-pid SCM_RIGHTS 回传（pid ns 开启）；
+      超时强制；CLI 打印捕获输出；feature 门控 `cli`/`profile`
+- [ ] **阶段 1（CodeWhale 同步路径）**：`seabox.rs` 后端 + `SandboxType::Seabox`（Linux 默认）；
+      `map_safety_level_to_behavior` 接线（`Safe` 去网络）；拒绝检测结构化；删除 `bwrap.rs` / `seccomp.rs`；
+      移除 `prefer_bwrap`
+- [ ] **阶段 2（CodeWhale 后台/tty）**：`ShellChild::Seabox` 变体；后台 `Sandbox::spawn(Piped)` + job table；
+      tty openpty + `StdioConfig::Fd`；persist 保持 DangerFullAccess 无沙箱
+- [ ] **阶段 3（测试与文档）**：spawn / pid 回传 / Fd 注入 / 超时测试；同步与后台/tty parity 测试
+
+> **2026-08-14 决策：HTTP API 暂缓（维持）。** 调研结论：
 > HTTP sandbox API（OpenSandbox、E2B、Daytona……）是"远程 microVM/容器沙箱"市场的标配，
 > 与本项目"本地 OS 沙箱（Landlock + seccomp + ns）"的威胁模型不匹配——加入该生态需要容器/K8s + 注入 daemon，
 > 现有消费者不会连本地 daemon。若日后做"嵌入 Agent 框架"的接入，优先考虑 **MCP tool server** 而非 HTTP。
+> Phase 4 现聚焦 **CodeWhale 库级集成**（`docs/arch/codewhale-integration/`），HTTP API 不在本期范围。
 
 ## 阶段依赖关系
 

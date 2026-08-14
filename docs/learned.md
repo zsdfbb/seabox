@@ -60,3 +60,39 @@ mount(NULL, target, NULL, MS_RDONLY|MS_REMOUNT|MS_BIND|MS_REC) = -1 EPERM       
 **测试**：`mount_ro_bind_readonly_nonroot`（EPERM 回归）、`mount_ro_bind_with_writable_overlay`（顺序回归）。
 
 **教训**：非 root 的只读保护首选 **Landlock**（`--landlock '/:ro'`）；`--ro-bind` 修复后非 root 可用，但叠加可写子目录必须把基座写在前面。
+
+---
+
+## SCM_RIGHTS 传不了 pid，跨 pid-ns 回传用 SCM_CREDENTIALS（2026-08-14）
+
+设计 CodeWhale 集成时曾假设「child 经 SCM_RIGHTS 回传 business pid」——技术上不成立：
+SCM_RIGHTS 只能传 fd；且 pid-ns 内 business 进程 `getpid()` 返回 ns 内 pid（=2），
+它**不知道自己的宿主 pid**，无法作为 payload 发出。
+
+**正确机制**：父端 socketpair 设 `SO_PASSCRED`，内核在 recvmsg 时自动附 `SCM_CREDENTIALS`，
+其 `pid` 字段按**接收者的 pid-ns** 解释。seabox 父进程在宿主 ns → 拿到 business 的宿主 pid。
+**实测验证**（userns→pidns→双层 fork→SO_PASSCRED 探针）：收到的 pid = business 宿主 pid
+（249527），非 ns 内 pid（2）。
+
+**教训**：跨 pid-ns 传"对方是谁"用 SCM_CREDENTIALS（内核代填、按接收者 ns 解释），
+SCM_RIGHTS 只负责传 fd。此语义依赖内核行为，实现时须配端到端探针测试断言
+`id()` == /proc 反推的宿主 pid，不能只靠文档。
+
+**测试**：`pid_ns_id_is_business_host_pid`、`pid_ns_kill_group`（ADR 006 A2，阶段 0）。
+
+---
+
+## setpgid(0,0) 破坏终端 Ctrl+C / 作业控制（2026-08-14）
+
+无条件 `setpgid(0,0)` 会把沙箱子进程移出终端**前台进程组**。`seabox run -- sleep 100`
+后 Ctrl+C 只杀 seabox 自己，子进程孤儿继续跑（setpgid 前二者共享前台组，Ctrl+C 全杀）。
+
+**修复**：`process_group` 配置（默认 true）+ `cmd_run` 转发 SIGINT/SIGTERM 到子进程组。
+信号转发保住 CLI Ctrl+C；CodeWhale 开箱即得组杀。
+
+**教训**：给子进程 setpgid 是"安全组杀"的前提（kill(-pgid) 恒命中自建新组、绝不碰调用方终端组），
+但它同时**破坏继承的终端作业控制**——任何以 CLI 方式调用沙箱的场景都要配信号转发。
+进程组语义的改动要检查"用户 Ctrl+C 会发生什么"，不只是进程退出路径。
+
+**测试**：`wait_timeout_kills_group`、`cmd_run` 信号转发（阶段 0）。
+

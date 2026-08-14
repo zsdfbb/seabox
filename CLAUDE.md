@@ -54,8 +54,12 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 | [docs/adr/0001-seccomp-user-notif-vs-sigsys.md](docs/adr/0001-seccomp-user-notif-vs-sigsys.md) | ADR 001：seccomp USER_NOTIF vs SIGSYS handler |
 | [docs/adr/0002-config-landlock-rules.md](docs/adr/0002-config-landlock-rules.md) | ADR 002：SandboxConfig 扁平结构 + Raw Landlock 规则 |
 | [docs/adr/0003-fork-after-zero-heap.md](docs/adr/0003-fork-after-zero-heap.md) | ADR 003：fork 后子进程零堆操作（多线程 safe） |
+| [docs/adr/0004-capability-management.md](docs/adr/0004-capability-management.md) | ADR 004：capability 权限管理（--cap-add/drop/inherit） |
+| [docs/adr/0005-profile-argfile.md](docs/adr/0005-profile-argfile.md) | ADR 005：@file argfile 预处理（profile 机制） |
+| [docs/adr/0006-spawn-api-business-pid.md](docs/adr/0006-spawn-api-business-pid.md) | ADR 006：spawn API + business-pid 回传（SCM_CREDENTIALS） |
 | [docs/arch/phase2-wrapup/](docs/arch/phase2-wrapup/) | Phase 2 收尾设计：`--allow-network` 方案、四方案对比、ADR、review |
 | [docs/arch/mount-namespace/](docs/arch/mount-namespace/) | mount ns 设计：`--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`、ADR、review |
+| [docs/arch/codewhale-integration/](docs/arch/codewhale-integration/) | Phase 4：CodeWhale 库级集成（context + design + 阶段 0 spawn 详细设计 + ADR 006，2026-08-14） |
 | [docs/learned.md](docs/learned.md) | 跨会话经验教训（踩坑记录） |
 | [CONTEXT.md](CONTEXT.md) | 领域词汇表 |
 
@@ -80,7 +84,9 @@ seabox/
 │   │   ├── 0002-config-landlock-rules.md
 │   │   └── 0003-fork-after-zero-heap.md
 │   ├── arch/
-│   │   └── phase2-wrapup/      # --allow-network 设计
+│   │   ├── phase2-wrapup/      # --allow-network 设计
+│   │   ├── mount-namespace/    # mount ns 设计（--unshare-mnt / --bind / --ro-bind / --tmpfs）
+│   │   └── codewhale-integration/  # Phase 4：CodeWhale 库级集成（context + design）
 │   ├── design-final/
 │   │   └── seccomp-deny-message.md
 │   ├── design-plans/completed/
