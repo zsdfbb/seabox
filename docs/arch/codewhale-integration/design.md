@@ -4,6 +4,10 @@
 > 状态：**已批准**（决策 D1-D6 已确认，见 `context.md`）
 > 上下文：`docs/arch/codewhale-integration/context.md`
 
+> ⚠️ **基线注记（2026-08-14 修正）**：集成对象为 CodeWhale **个人 fork**（入口
+> `Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`，origin `zsdfbb/CodeWhale_seabox`，
+> 非上游 `Hmbown/CodeWhale`）。文中文件级改动清单基于上游调研，开工前在个人 fork 上复核。
+
 ---
 
 ## 1. 背景与决策摘要
@@ -191,7 +195,7 @@ impl SeaboxSandbox {
 
 ### 3.7 依赖与入口
 
-- `crates/tui/Cargo.toml`：`seabox = { path = "../../seabox", default-features = false }`（相对路径按 workspace 布局定）。
+- `crates/tui/Cargo.toml`：`seabox = { path = "../../../seabox", default-features = false }`（个人 fork 与 seabox 同目录树：`/home/zs/Develop/` 下兄弟目录，`crates/tui` 上三级）。
 
 ---
 
@@ -272,7 +276,7 @@ enum ShellChild {
 | `Cargo.toml` | feature 门控 `cli`/`profile`（default 保留两者） |
 | `tests/*` | 0.7 新增测试 + 全量回归 |
 
-### CodeWhale（`/home/zs/OpenSrc/CodeWhale`）
+### CodeWhale（个人 fork：`Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`）
 
 | 文件 | 改动 |
 |---|---|

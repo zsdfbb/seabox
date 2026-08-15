@@ -4,11 +4,18 @@
 > 状态：**已定稿**（决策已确认）
 > 配套设计：`docs/arch/codewhale-integration/design.md`
 
+> ⚠️ **基线注记（2026-08-14 修正）**：文中 CodeWhale 沙箱架构调研（函数位置/行号）基于上游
+> `Hmbown/CodeWhale`（`/home/zs/OpenSrc/CodeWhale`）探索。集成对象实为 **个人 fork**
+> `CodeWhale_seabox`（入口 `Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`，
+> origin `zsdfbb/CodeWhale_seabox`）。阶段 1 开工前需在个人 fork 上复核。
+
 ---
 
 ## 概述
 
-目标：将 seabox（`/home/zs/Develop/seabox`）以 **crate 依赖（库级）** 方式集成进 CodeWhale（`/home/zs/OpenSrc/CodeWhale`），替换并删除 Linux bwrap 后端，同时修复对 CodeWhale 沙箱调用方式的 6 项批判发现的问题。
+目标：将 seabox（`/home/zs/Develop/seabox`）以 **crate 依赖（库级）** 方式集成进 CodeWhale
+**个人 fork**（入口 `Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`，非上游），
+替换并删除 Linux bwrap 后端，同时修复对 CodeWhale 沙箱调用方式的 6 项批判发现的问题。
 
 集成范围覆盖 CodeWhale 的三条执行路径：
 
@@ -186,7 +193,7 @@ authority::sandbox_policy_for_turn        authority.rs:337   ← turn 级策略�
 
 ## 参考文件索引
 
-**CodeWhale**（`/home/zs/OpenSrc/CodeWhale`）：
+**CodeWhale（个人 fork：`Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`）**：
 
 | 文件 | 内容 |
 |---|---|
