@@ -48,10 +48,17 @@ Phase 2b 原与 Phase 3、4 并行，现明确降级为 Phase 4 的前置依赖�
 - 拒绝检测
 - 跨平台 `Sandbox` enum（`Linux | MacOs | None`）
 
-## Phase 4 — CodeWhale 集成（🚧 进行中）
+## Phase 4 — CodeWhale 集成（✅ 库级后端集成已完成；HTTP API 仍暂缓）
 
 以 **crate 依赖（库级）** 方式集成进 CodeWhale，替换并删除 Linux bwrap 后端，
-覆盖前台同步 / 前台交互 / 后台非 tty / 后台 tty **四条**执行路径（stage1-context 修正 design.md 的"三条"）。设计见 `docs/arch/codewhale-integration/`。
+覆盖后台非 tty / 后台 tty / 前台（经 job table）**三条** seabox 化执行路径。
+**阶段 1+2 已于 2026-08-22 在个人 fork（`/home/zs/Develop/CodeWhale_seabox`）实施完成**：
+`SandboxType::Seabox` Linux 默认 + `ExecEnv.seabox` 载体 + `ShellChild::Seabox`；
+非 tty `StdioConfig::Piped` / tty `StdioConfig::Fd` + openpty；
+结构化拒绝（`blocked()` + stderr 兜底）；`map_safety_level_to_behavior` 接线（D5 `Safe`→no-network）；
+删除 `bwrap.rs` / `seccomp.rs`，`prefer_bwrap` 全仓移除。
+设计见 `docs/arch/codewhale-integration/design.md`（§9 实施状态），执行计划见
+`docs/exec-plans/2026-08-22-codewhale-seabox.md`。
 
 - [x] **阶段 0（seabox 库扩展）✅ 已完成（2026-08-14）**：`CommandOutput` 补 stdout/stderr/timed_out；
       `CommandSpec::with_stdin` + timeout→`Option`；`Sandbox::spawn` + `SandboxChild`
@@ -60,17 +67,18 @@ Phase 2b 原与 Phase 3、4 并行，现明确降级为 Phase 4 的前置依赖�
       （ADR 006，实测 `id()==宿主 pid`，非 SCM_RIGHTS）；超时强制（默认 None）；`cmd_run` 改
       spawn(Inherit) 流式 + SIGINT/SIGTERM 转发；feature 门控 `cli`。221 测试全绿，
       详见 `docs/design-final/codewhale-stage0-spawn-api.md`
-- [ ] **阶段 1（CodeWhale 同步路径）【下一步】**：`seabox.rs` 后端 + `SandboxType::Seabox`（Linux 默认）；
-      `map_safety_level_to_behavior` 接线（`Safe` 去网络）；拒绝检测结构化；删除 `bwrap.rs` / `seccomp.rs`；
-      移除 `prefer_bwrap`。范围覆盖前台两条路径（同步 + 交互 `execute_interactive_sandboxed`）。
-      **开工前置决策**（探索见 `docs/arch/codewhale-integration/stage1-context.md`）：
-      Q1 后端集成模型（`ExecEnv` 包装 vs `SandboxExecutor` 接线 vs 内联）；Q2 bwrap 删除时机
-      （建议保留到阶段 2，消除后台安全空窗）
-- [ ] **阶段 2（CodeWhale 后台/tty，覆盖路径 3/4）**：`ShellChild::Seabox` 变体；后台非 tty
+- [x] **阶段 1（CodeWhale 后端替换 + 三路径 seabox 化）✅ 已完成（2026-08-22）**：
+      `seabox.rs` 映射后端 + `SandboxType::Seabox`（Linux 默认）+ `ExecEnv.seabox` 载体；
+      `map_safety_level_to_behavior` 接线（`Safe` 去网络）；拒绝检测结构化（`blocked()`）+ stderr 兜底；
+      删除 `bwrap.rs` / `seccomp.rs`；`prefer_bwrap` 全仓移除。
+      **fork 现实修正**：生产 Bash 前台经 `execute_foreground_via_background` → job table（`background=true`），
+      `execute_sync_sandboxed`（`shell.rs:1752`）生产零调用——阶段 1 同步语义落于 `spawn_background_sandboxed`，tty 一并纳入。
+- [x] **阶段 2（CodeWhale 后台/tty）✅ 已完成（2026-08-22）**：`ShellChild::Seabox` 变体；后台非 tty
       `Sandbox::spawn(Piped)` + job table；后台 tty openpty + `StdioConfig::Fd`；persist 保持
       DangerFullAccess 无沙箱
-- [ ] **阶段 3（测试与文档）**：spawn / pid 回传 / Fd 注入 / 超时测试（阶段 0 已覆盖大部分）；scm_creds
-      容器化探针；同步与后台/tty parity 测试
+- [x] **阶段 3（测试与文档）✅ 已完成（2026-08-22）**：spawn / pid 回传 / Fd 注入 / 超时测试（阶段 0 已覆盖大部分）；
+      sandbox/seabox/shell 新增用例全绿；tui lib 基线 9 失败（reasoning-effort 8 + unicode 1，fork 现状）保留；
+      integration/pty 各有 1 个与 HEAD 基线相同的环境挂；`rg -n 'bwrap|prefer_bwrap' crates/tui` 为空
 
 > **2026-08-14 决策：HTTP API 暂缓（维持）。** 调研结论：
 > HTTP sandbox API（OpenSandbox、E2B、Daytona……）是"远程 microVM/容器沙箱"市场的标配，

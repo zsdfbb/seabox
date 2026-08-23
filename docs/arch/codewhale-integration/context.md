@@ -216,3 +216,20 @@ authority::sandbox_policy_for_turn        authority.rs:337   ← turn 级策略�
 | `src/linux/mod.rs` | `execute()`（95，fork+waitpid）；USER_NOTIF worker |
 | `src/linux/child_setup.rs` | `enter_child`（零堆，ADR 0003），pre_exec 序列 |
 | `src/main.rs` | `cmd_run`（37），需改打印捕获输出 |
+
+---
+
+## implemented on fork（2026-08-22）
+
+> 阶段 1+2（三路径 seabox 化 + Linux 默认 Seabox + 删 bwrap/seccomp）已在个人 fork
+> （`/home/zs/Develop/CodeWhale_seabox`）实施完成。实施结果详见 `design.md` §9；
+> 细粒度任务（T1-T9）见实施计划 `docs/exec-plans/2026-08-22-codewhale-seabox.md`。
+
+- **关键行号已按 fork 复核定稿**（本文件上文行号为上游探索基线，已过时，以本段为准）：
+  - `execute_sync_sandboxed` → `crates/tui/src/tools/shell.rs:1752`，**生产零调用**——生产 Bash 前台经
+    `execute_foreground_via_background` → job table（`background=true`），阶段 1 语义落于 `spawn_background_sandboxed`；
+  - `was_denied` 同步/后台判定位于 `crates/tui/src/tools/shell.rs`（后台完成事件改用 `child.blocked()`
+    结构化判定，同步/其它路径保留 stderr 文本兜底）。
+- 上文「批判 → 修复映射」「参考文件索引」中 `bwrap.rs`（47）/ `seccomp.rs`（153）/ `prefer_bwrap`
+  （config.rs:2558/2579、engine.rs:399/492）等行号仅作历史基线参考——相关文件与字段已删除，
+  `prefer_bwrap` / `bwrap` 在 `crates/tui` 全仓无残留。

@@ -302,3 +302,113 @@ enum ShellChild {
 | tty+seccomp 冲突 | 阶段 2 端到端 tty parity 测试兜底 |
 | Landlock 例外翻译错漏 | 阶段 1 同步 parity 测试逐一对照 bwrap 例外清单 |
 | 回滚 | 阶段按序合并，每阶段可独立 revert；bwrap 删除前确保同步路径 parity 测试通过 |
+
+---
+
+## 8. 集成基线测试结果（2026-08-17 复核）
+
+> 本段记录集成开工前对 **个人 fork**（`Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`，
+> origin `zsdfbb/CodeWhale_seabox`）的基线复核。基线对象：fork `main`，HEAD `c9b9559a7`，
+> 工作区干净且与 origin 同步（2026-08-17 `git pull` 显示已最新，无新代码）。本段**不是改动计划**——
+> fork 代码未改动，下述失败均为 fork `main` 现状，待集成各阶段按序处理（见 §3-§6）。
+
+### 8.1 环境前提（一次性，已就绪）
+
+| 项 | 说明 |
+|---|---|
+| crates.io 镜像 | 本机 `static.crates.io` 直连超时 → 已配置 `~/.cargo/config.toml` 走 **USTC** sparse 镜像（实测 ~2 MB/s），影响机器所有 Rust 项目 |
+| `libdbus-1-dev` | `libdbus-sys`（引入链 `codewhale-secrets → keyring → dbus-secret-service → dbus`）需系统 `dbus-1.pc`，Ubuntu 26.04 上已安装 |
+
+### 8.2 构建
+
+`cargo build --workspace` ✅ 通过（22 个 crate，约 2m44s）。
+
+### 8.3 测试
+
+本机默认 locale 为 `zh_CN.UTF-8`（i18n 会把 UI 文案翻译为中文）。基线测试命令：
+
+```bash
+LC_ALL=C LANG=C cargo test --workspace -- --skip dispatcher_diagnostics_are_in_process_and_read_only
+```
+
+| 运行条件 | 结果（codewhale-tui lib，其余 31 套件全过） |
+|---|---|
+| 默认 `zh_CN` locale | 10358 passed / **34 failed** |
+| `LC_ALL=C` | 10381–10383 passed / **9–11 failed**（9 稳定 + 2 偶发 flaky） |
+
+`--skip` 跳过的是 1 个本机挂死用例（见下，属环境问题，CI 不触发）。
+
+### 8.4 失败分类
+
+| 类别 | 数量 | 说明 | 与本机/环境关联 |
+|---|---|---|---|
+| locale 文案失败 | ~25 | `zh_CN` 下 i18n 输出中文文案，断言英文文案的测试失败（如 `"verifying"` ≠ `"校验中"`） | **环境**：`LC_ALL=C` 后全部消失；CI 用英文 locale 不暴露，非 fork 缺陷 |
+| 挂死 1 个 | 1 | `cli/tests/diagnostic_dispatch_read_only.rs`：`env_clear` 密封 HOME 后 `doctor` 流程 spawn `rustc --version`，本机 `rustc` 为 rustup shim，在密封 HOME 找不到 toolchain 即触发下载 → 网络超时挂死 | **环境**：rustup CDN 亦超时。CI 网络正常不触发。TUI 侧同场景已有 `preserve_host_rustup_home` 正解（`crates/tui/tests/integration/diagnostic_read_only.rs:772`，re-inject `RUSTUP_HOME`），CLI 侧缺失，集成阶段可一并补 |
+| 确定性失败 | 9 | reasoning-effort / provider 序列化 8 个 + unicode 过滤 1 个（详见下） | **fork `main` 现状**，与 locale 无关，各次运行稳定复现 |
+| 偶发 flaky | 2 | `skills::cached_discovery_reuses_unchanged_registry_without_rewalking`、`test_support::settings_save_waits_for_foreign_state_io_transaction` | **环境**：timing / `EnvGuard` 全局环境锁并行竞争，两次运行间翻转 |
+
+**9 个确定性失败清单**（`LC_ALL=C` 下稳定复现）：
+
+- reasoning-effort / provider 序列化（8）：`settings::reasoning_effort_setting_normalizes_and_clears`、`terminal_mode_tests::cli_reasoning_effort_normalizes_aliases_and_rejects_typos`、`fleet::profile::profile_loader_normalizes_reasoning_aliases`、`commands::groups::config::config_reasoning_effort_uses_codex_provider_labels`、`tui::app::fixed_route_thinking_cycle_persists_raw_preference`、`tui::app::reasoning_cycle_persists_through_the_same_owner_as_the_picker`、`tui::model_picker::picker_keeps_default_when_catalog_has_no_reasoning_options`、`tui::ui::ctrl_t_key_event_reaches_reasoning_effort_cycle`
+- unicode 过滤（1）：`tui::views::config_view_filter_accepts_j_k_and_unicode_case`
+
+根因（reasoning-effort 类）：测试期望**配置存储 provider 中立的 canonical 值 `"max"`**（`xhigh`/`ultra`/`ultracode` → `max`，Codex 仅在 provider 边界把 `Max` 显示/发送为 `xhigh`），而 `ReasoningEffort::as_setting(XHigh)` 当前返回 `"xhigh"`。即测试预期与 code 现状不一致，属 fork `main` 未收敛状态。
+
+### 8.5 复核结论
+
+- **构建基线 ✅**；**测试基线**在 `LC_ALL=C` 下为「9 个确定性失败 + 2 个偶发 flaky + 1 个环境挂死」，均属 fork `main` 现状，非 seabox 引入。
+- 集成改动面（阶段 1-2：`sandbox/*`、`tools/shell.rs`、`config.rs`、`engine.rs`）与上述失败测试的模块**无直接重叠**，集成可在此基线上叠加。
+- 涉及 reasoning-effort 相关路径时需留意「配置存储应为 provider 中立 `max`」这一预期，避免新代码与其相悖。
+- 每次拉取 fork 新代码后按 §8.3 命令复测，跟踪上述失败是否随 fork `main` 演进（本段是移动基线，非一次性快照）。
+
+---
+
+## 9. 实施状态（2026-08-22）
+
+> 阶段 1+2 已在 **个人 fork**（`/home/zs/Develop/CodeWhale_seabox`）实施完成。
+> 执行计划（T1-T9）见 `docs/exec-plans/2026-08-22-codewhale-seabox.md`，上下文注记见 `context.md`。
+
+### 9.1 已落地（阶段 1+2）
+
+- **三路径 seabox 化**：后台非 tty + 后台 tty + 前台（经 job table，见 §9.2）。
+- **`SandboxType::Seabox`** Linux 默认后端（修复 P0-1）：`get_platform_sandbox` 直接返回 Seabox，
+  `get_platform_sandbox_with_bwrap_preference` 删除；`PUBLIC_SANDBOX_BACKENDS` 更新为
+  「seabox (Linux, default)」。
+- **`ExecEnv.seabox: Option<SeaboxPlan>`** 载体（P1-1）：`SandboxManager::prepare()` 产出 seabox
+  配置/命令规格；`DangerFullAccess` / `ExternalSandbox` → `None`；后端为 Seabox 但 `seabox.is_none()`
+  → fail-closed 报错，不降级。
+- **`ShellChild::Seabox(seabox::SandboxChild)`**（D4）：`process_id()` / `try_wait()` / `kill()` 委托
+  （kill 走 seabox 进程组组杀）。
+- **非 tty `StdioConfig::Piped`**（`take_stdout/take_stderr` → 现有 `spawn_reader_thread` + job table
+  机制不变，`take_stdin` → `StdinWriter::Fd`）；**tty `StdioConfig::Fd`** + CodeWhale openpty（读 master）。
+- **结构化拒绝**（修复 P1-2）：后台完成事件用 `child.blocked()`（`BackgroundShell.seabox_blocked`）判定
+  `sandbox_denied`；同步/其它路径保留 `was_denied` stderr 文本兜底。
+- **`map_safety_level_to_behavior` 生产接线**（修复 P0-2）：`SafetyLevel::Safe` → `network_access=false`
+  （D5，`force_no_network` 钳制 `WorkspaceWrite`/`ExternalSandbox` 的 network 字段）。
+- **删除** `sandbox/bwrap.rs`（D2）与 `sandbox/seccomp.rs`（P1-3）；**`prefer_bwrap` 全仓移除**
+  （config / engine / acp_server / lib / frame / runtime_threads / diagnostics），
+  `rg -n 'bwrap|prefer_bwrap' crates/tui` 为空。
+
+### 9.2 fork 现实修正
+
+生产 Bash 前台**不经过 `execute_sync_sandboxed`**——它经 `execute_foreground_via_background` → job table
+（`background=true`），`execute_sync_sandboxed`（`shell.rs:1752`）**生产零调用**（仅外部/测试调用）。
+因此阶段 1 的同步语义实际落在 **`spawn_background_sandboxed`**（tty 一并纳入，见 §4.2-§4.3）。
+`execute_sync_sandboxed` 内 seabox 分支按 §3.3 保留（`seabox::Sandbox::execute` 全权执行），供测试/外部使用。
+§3.4-§3.6 的改造面（接线 / 结构化拒绝 / 删 bwrap 与 prefer_bwrap）均落地。
+
+### 9.3 测试摘要
+
+| 套件 | 结果 |
+|---|---|
+| tui lib 全量（`LC_ALL=C`） | **9 个基线确定性失败保留**（reasoning-effort 8 + unicode 1，属 fork `main` 现状，与本次改动模块无重叠） |
+| sandbox / seabox / shell 新增用例 | **全绿**：映射单元测试、分发断言改写（Seabox 默认）、三路径 parity、结构化拒绝（拒绝 syscall → `sandbox_denied==true`）、进程组 kill、tty smoke |
+| integration / pty | 各有 **1 个环境挂**，与 HEAD 基线相同，已由 **stash 二分**证实与本次改动无关 |
+
+- 新增用例对 blob 一律显式指定 `SandboxPolicy`（避免依赖默认翻转）。
+- `rg -n 'bwrap|prefer_bwrap' crates/tui` 为空，N9 验收：失败集 ⊆ 基线（9 确定 + 各 1 环境挂），无新增真实回归。
+
+### 9.4 结论
+
+阶段 1+2 库级后端集成已完成，测试失败集 ⊆ 基线（9 确定 + 各 1 环境挂），无新增真实回归。
+HTTP API 维持暂缓（2026-08 决策不变）。
