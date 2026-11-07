@@ -34,7 +34,8 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 - ⏱️ **超时控制**：`--timeout` / `--timeout-max` 防止命令无限挂起
 - 🌐 **环境控制**：`--env` / `--unsetenv` / `--clearenv`
 - 🔌 **两种集成方式**：CLI 二进制 + `pub trait Sandbox` crate API（一一对应）
-- 🧪 **168 项集成测试**：按能力维度分文件，内核能力缺失时自动跳过（不是 fail）
+- 🍎 **macOS Seatbelt 后端**：三种预设 + 12 个 `--mac-*` 旗标，SBPL profile 生成，fd 清扫防继承逃逸
+- 🧪 **171 项测试**：按能力维度分文件，内核能力缺失时自动跳过（不是 fail）
 
 ## 平台支持
 
@@ -42,7 +43,10 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 |---|---|---|
 | Linux 5.13+ | ✅ | Landlock + seccomp + namespaces |
 | Linux 3.5 – 5.12 | ⚠️ 部分可用 | seccomp（无 Landlock 文件系统限制） |
-| macOS 10.5+ | ✅ | Seatbelt（SBPL + `sandbox-exec`） |
+| macOS | ✅ 已在 27.0.1 / arm64 实测 | Seatbelt（SBPL + `sandbox-exec`） |
+
+> Seatbelt / `sandbox-exec` 自 macOS 10.5 起就存在，但本项目**仅在 27.0.1 / arm64 上实测过**；
+> 更旧版本未验证，不在此承诺。
 
 两个后端的配置面**双向互斥**，误用会硬错误而不是静默忽略：macOS 上 `--landlock` / `--unshare-*` /
 `--seccomp-*` / `--cap-*` / `--bind` 均报错并提示改用 `--mac-*`；Linux 上 `--mac-*` 报错并提示改用 `--landlock`。
@@ -86,6 +90,9 @@ seabox run --mac-read /usr --mac-read /System --mac-read $PWD -- ls
 cargo install seabox
 ```
 
+当前版本：**0.1.0**（首个支持 macOS 的版本，含 breaking 变更，
+升级前请读 [CHANGELOG.md](CHANGELOG.md)）。
+
 ### 预编译二进制（musl 静态）
 
 ```bash
@@ -109,7 +116,14 @@ cargo build --release
 seabox = "0.1"
 ```
 
+> 0.1.0 有两处 breaking：`DenyMechanism` 新增 `Seatbelt` 变体、
+> `SandboxConfig` 新增 `macos` 字段（两者均无 `#[non_exhaustive]`）。
+> 对 `ExitReason` 做穷尽 `match` 时加 `_ => ..`；构造 `SandboxConfig` 时用
+> `..Default::default()`。详见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 快速开始
+
+### Linux
 
 ```bash
 # 1. 检查当前系统沙箱能力
@@ -131,6 +145,18 @@ seabox run --landlock '/:ro' --landlock '/tmp:rw' -- sh -c 'echo data > /tmp/out
 seabox run --unshare-all -- ls -la
 ```
 
+### macOS
+
+```bash
+seabox check    # Seatbelt (sandbox-exec) available (/usr/bin/sandbox-exec)
+
+# 只读：读全盘，仅 TMPDIR 可写
+seabox run --mac-preset read-only -- ls /etc
+
+# 工作区：可写 cwd + TMPDIR
+seabox run --mac-preset workspace-write -- cargo build
+```
+
 ## CLI 使用
 
 ### 子命令
@@ -138,7 +164,7 @@ seabox run --unshare-all -- ls -la
 | 子命令 | 说明 |
 |---|---|
 | `run` | 在沙箱中执行命令 |
-| `check` | 打印当前系统可用的 Landlock / seccomp / namespace 能力 |
+| `check` | 打印当前系统可用的沙箱能力（Linux：Landlock / seccomp / namespace；macOS：Seatbelt） |
 | `serve` | HTTP API 服务器（尚未实现，该方向已暂缓，见路线图） |
 
 ### `run` 选项
@@ -202,12 +228,33 @@ seabox run --unshare-all -- ls -la
 | `--seccomp-deny-nr <NR>` | 用 USER_NOTIF 拦截指定 syscall 号（可重复）。常见号（x86_64）：165=mount、97=unshare、173=ptrace |
 | `--seccomp-filter-fd <FD>` | 从 fd 读取原始 cBPF 字节码并追加到 filter 链 |
 
+**macOS Seatbelt**（仅 macOS；在 Linux 上使用会硬错误）
+
+| 选项 | 说明 |
+|---|---|
+| `--mac-preset <NAME>` | 预设：`read-only` / `workspace-write` / `full-access`。只填默认值，任何 `--mac-*` 都可覆盖对应项 |
+| `--mac-write <PATH>` | 可写目录（可重复）。**递归含整棵子树与删除权** |
+| `--mac-deny-write <PATH>` | 写拒绝目录（可重复；叠加在 `--mac-write` 之上，后写赢） |
+| `--mac-workspace <DIR>` | `workspace-write` 预设的写根（默认 cwd）。**语义是替换而非追加** |
+| `--mac-read <PATH>` | 读白名单（可重复）。**出现即切到 `Only` 模式**，实现真正读隔离 |
+| `--mac-read-all` | 读全开（默认；显式覆盖更早的 `--mac-read`） |
+| `--mac-deny-read <PATH>` | 读拒绝目录（可重复；叠加在内置凭据清单之上） |
+| `--mac-net <SPEC>` | `deny` / `loopback` / `all` / 端口列表如 `443,80` |
+| `--mac-net-inbound` | 放通 loopback 入站连接 |
+| `--mac-no-credential-deny` | 关闭内置凭据拒绝清单（`~/.ssh`、`~/.aws` 等；默认开启） |
+| `--mac-no-git-write` | 不在 workspace 内放行 `.git` 写（默认放行；关闭后 `git add` 会卡在 `index.lock`） |
+| `--mac-no-tmp-writable` | TMPDIR 不可写（默认在预设下可写） |
+
+> 不指定任何 `--mac-*` 且无预设 ⇒ **不施加 Seatbelt**（保留 `ps` 等 setuid 工具能力）。
+> 详见 [`docs/macos-sandbox.md`](docs/macos-sandbox.md)。
+
 **其他**
 
 | 选项 | 说明 |
 |---|---|
 | `--chdir <DIR>` | 覆盖工作目录 |
 | `-d, --debug` | 调试输出 |
+| `-V, --version` | 打印版本 |
 | `-- <COMMAND>...` | 要执行的命令（`--` 分隔选项与命令） |
 
 ### 退出码约定
@@ -215,11 +262,17 @@ seabox run --unshare-all -- ls -la
 | 退出码 | 含义 |
 |---|---|
 | `0` | 命令成功执行 |
+| `124` | 超时被强制杀死（`timeout(1)` 惯例） |
 | `125` | 沙箱内部错误 |
 | `126` | 沙箱拒绝（Landlock / seccomp / namespace） |
 | 命令原始退出码 | 命令自行以非零状态退出（与沙箱无关） |
+| `128+N` | 命令被信号 N 杀死（signal-death 不退化为 1） |
 
 拒绝时 stderr 输出结构化诊断，如 `Blocked by seccomp filter (SIGSYS): syscall='mount' category='mount' nr=165 arch=0xc000003e`。
+
+> ⚠️ **macOS 例外**：CLI 走流式 `spawn(Inherit)` 拿不到 stderr，因此 Seatbelt 拒绝
+> 退化为命令原始非零退出（通常 `1`）而非 `126`。要结构化的
+> `Denied { mechanism: Seatbelt, .. }` 请用库 API `Sandbox::execute()`。
 
 ### ⚠️ 沙箱不解释 shell 元字符
 
@@ -250,7 +303,7 @@ let config = SandboxConfig::default()
     .with_landlock("/tmp:rw")?
     .with_timeout(10, 60);
 
-// ── 创建沙箱（Linux 上用 Landlock + seccomp + namespace；其他平台返回错误）──
+// ── 创建沙箱（Linux 用 Landlock + seccomp + namespace；macOS 用 Seatbelt）──
 let sandbox = Sandbox::from_config(config)?;
 
 // ── 命令规格 ──
@@ -282,18 +335,26 @@ match reason {
 
 ## 测试
 
-测试按"能力维度"分文件，共 **90 项集成测试**：
+测试按"能力维度"分文件，共 **171 项**（全平台 21 + 仅 Linux 127 + 仅 macOS 23）：
 
-| 文件 | 验证内容 |
-|---|---|
-| `tests/config_test.rs` | `SandboxConfig` 的 TOML / Builder / 展开行为 |
-| `tests/landlock_test.rs` | Landlock 实际 ACL 行为（需要 5.13+） |
-| `tests/seccomp_test.rs` | `--seccomp-deny-nr` 逐 syscall 拦截 + 拒绝诊断 |
-| `tests/namespace_test.rs` | 7 种 namespace 隔离 + uid/gid/hostname + chdir + env |
-| `tests/mount_test.rs` | `--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs` |
-| `tests/network_test.rs` | netns 隔离 + `--allow-network` loopback 放通 |
-| `tests/concurrent_fork_test.rs` | fork 后子进程零堆操作（多线程安全） |
-| `tests/deny_detect_test.rs` | `classify_exit()` 退出原因分类 |
+| 文件 | 验证内容 | 平台 |
+|---|---|---|
+| `tests/config_test.rs` | `SandboxConfig` 的 TOML / Builder / 展开行为 | Linux |
+| `tests/landlock_test.rs` | Landlock 实际 ACL 行为（需要 5.13+） | Linux |
+| `tests/seccomp_test.rs` | `--seccomp-deny-nr` 逐 syscall 拦截 + 拒绝诊断 | Linux |
+| `tests/namespace_test.rs` | 7 种 namespace 隔离 + uid/gid/hostname + chdir + env | Linux |
+| `tests/mount_test.rs` | `--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs` | Linux |
+| `tests/network_test.rs` | netns 隔离 + `--allow-network` loopback 放通 | Linux |
+| `tests/capability_test.rs` | `--cap-add` / `--cap-drop` / `--uid 0` 的 CapEff 实测 | Linux |
+| `tests/spawn_test.rs` | `Sandbox::spawn` + business-pid 回传 | Linux |
+| `tests/profile_test.rs` | `@file` argfile 预处理（profile） | Linux |
+| `tests/leak_test.rs` | fd / 内存泄漏回归 | Linux |
+| `tests/concurrent_fork_test.rs` | fork 后子进程零堆操作（多线程安全） | Linux |
+| `tests/deny_detect_test.rs` | `classify_exit()` 退出原因分类 | Linux |
+| `tests/macos_config_test.rs` | 12 个 `--mac-*` 解析/映射 + 双向硬错误 | 全平台 |
+| `tests/macos_test.rs` | Seatbelt 预设语义 + 凭据拒绝 + fd 逃逸（库 API） | macOS |
+| `tests/macos_cli_e2e_test.rs` | CLI 端到端：退出码 / 参数切分 / 管道 / fd 逃逸 | macOS |
+| `tests/cli_meta_test.rs` | `--version` / `--help` / 无子命令行为 | 全平台 |
 
 ```bash
 cargo test                          # 全部
@@ -301,7 +362,8 @@ cargo test --test namespace_test    # 指定文件
 cargo test -- --nocapture           # 显示 stdout
 ```
 
-内核能力缺失时（无 Landlock / 无 seccomp / 无 namespace）测试**自动跳过**，不是 fail。
+内核能力（Landlock / seccomp / namespace）或 `/usr/bin/sandbox-exec` 缺失时，
+测试**自动跳过**并打印 `skipping test`，不是 fail。
 
 ## 路线图
 
