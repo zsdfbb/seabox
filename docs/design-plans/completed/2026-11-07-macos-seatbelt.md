@@ -29,7 +29,7 @@ Phase 3 要兑现的能力是：**让 macOS 也成为一等目标平台**，用 
 | G4 | 策略语义失效 **fail-closed**（canary 预检） | F4/F5 |
 | G5 | 预开 fd 不能绕过文件策略（fd 清扫） | F1/F2/F3 |
 | G6 | 拒绝可归因为 `DenyMechanism::Seatbelt` | G1-G7 |
-| G7 | Linux 行为零变化 | N12（本机不可自动化，见 §5.3） |
+| G7 | Linux 行为零变化 | N12（本机不可自动化，见 §4.3） |
 | G8 | **mac 与 linux 代码彻底拆分，互不干扰** | N13（双向 grep 为空） |
 
 ### 1.3 与 Linux 后端的能力对照（不做的事见 §6）
@@ -229,7 +229,9 @@ trait SandboxImpl: Send + Sync {
 
 ---
 
-## 3. 架构：mac / linux 彻底拆分
+## 3. 涉及文件清单
+
+> 本章先给拆分的架构纪律（§3.1-3.4：三层文件布局、零交叉引用纪律、允许的交叉点、编译门控），再给逐文件清单（§3.5-3.7）。**「mac 与 linux 彻底拆分、互不干扰」是本轮的硬约束**（验收 N13）。
 
 ### 3.1 三层文件布局（硬约束）
 
@@ -334,11 +336,7 @@ fn linux_main() -> std::process::ExitCode { /* 原 main 体 */ }
 
 **结论（已实测）**：三处改完后 macOS 上 `cargo build --lib --bins --tests` 全通，零警告变更。
 
----
-
-## 4. 涉及文件清单
-
-### 4.1 新增文件
+### 3.5 新增文件
 
 | 路径 | 说明 |
 |---|---|
@@ -349,7 +347,7 @@ fn linux_main() -> std::process::ExitCode { /* 原 main 体 */ }
 | `tests/macos_config_test.rs` | 新增。**全平台**：13 个 `--mac-*` CLI flag → `MacOsConfig` 映射、`with_*` 一一对应性、双向硬错误 H1/H2/H3 |
 | `tests/macos_test.rs` | 新增。`#![cfg(target_os = "macos")]`：端到端 D1-D3、凭据 D4/D5、网络 E1-E3、闸门 F1-F5、平台边界 H4-H6 |
 
-### 4.2 修改文件
+### 3.6 修改文件
 
 | 路径 | 改动说明 |
 |---|---|
@@ -359,14 +357,14 @@ fn linux_main() -> std::process::ExitCode { /* 原 main 体 */ }
 | `src/lib.rs:189` | `check_capabilities` 加 macOS 分支输出（能力矩阵 / 不支持清单 / setuid 硬限制 / 预设说明 / 读模式）；Linux 分支一字不改 |
 | `src/lib.rs:529` | `SandboxImpl` trait 加 `classify_output` 默认实现（4 行） |
 | `src/lib.rs:596` | `Sandbox::execute` 改调 `classify_output(&output)`（1 行）；`:597` 的 `timed_out` 覆盖保持在**其后** |
-| `src/config.rs:24` | `SandboxConfig` 加 `pub macos: MacOsConfig`；建议同时加 `#[non_exhaustive]`（见 §5.1） |
+| `src/config.rs:24` | `SandboxConfig` 加 `pub macos: MacOsConfig`；建议同时加 `#[non_exhaustive]`（见 §5.2） |
 | `src/config.rs:45` | `impl Default` 补 `macos: MacOsConfig::default()` |
 | `src/cli.rs:144` | `Cli::Run` 新增 13 个 `--mac-*` 字段（`--mac-preset` / `--mac-write` / `--mac-deny-write` / `--mac-workspace` / `--mac-no-tmp-writable` / `--mac-read-all` / `--mac-read` / `--mac-deny-read` / `--mac-no-credential-deny` / `--mac-no-git-write` / `--mac-net` / `--mac-net-inbound` + help 标注 `[macOS only]`）；既有字段零改动 |
 | `src/cli.rs:596` | 字面量构造补 `macos: <由 flags 解析出的 MacOsConfig>` |
 | `src/bin/syscall_probe.rs` | 统一 `main` + `linux_main()` 分支，逐项 `#[cfg(target_os="linux")]`（禁止文件级 `#![cfg]`） |
 | `tests/*.rs`（12 个） | 每个顶部加 `#![cfg(target_os = "linux")]` |
 
-### 4.3 文档
+### 3.7 文档
 
 | 路径 | 改动 |
 |---|---|
@@ -375,9 +373,9 @@ fn linux_main() -> std::process::ExitCode { /* 原 main 体 */ }
 
 ---
 
-## 5. 测试策略
+## 4. 测试策略
 
-### 5.1 分层与文件落位（design §11.1）
+### 4.1 分层与文件落位（design §11.1）
 
 | 位置 | 平台 | 内容 | 为何放这里 |
 |---|---|---|---|
@@ -395,7 +393,7 @@ fn linux_main() -> std::process::ExitCode { /* 原 main 体 */ }
 | **段序断言**：`(deny default)` 位置 < floor < `(param "WS")` < `(param "D0")` < `(allow network` | 纯字符串位置 | ✅ **全平台** | **这才是安全防线**——改段落顺序的 PR 会在 Linux CI 变红 |
 | 全量文本快照 | `canonicalize` | macOS only | 捕捉意图外的变化 |
 
-### 5.2 测试合同（N1-N12）
+### 4.2 测试合同（N1-N13）
 
 | # | 合同 | 验收命令 / 断言 | 优先级 |
 |---|---|---|---|
@@ -415,7 +413,7 @@ fn linux_main() -> std::process::ExitCode { /* 原 main 体 */ }
 
 > N1-N11、N13 中标注「全平台」者可在 Linux CI 与 macOS 本机分别跑；仅 N6/N7 与 D/E/F 组需要 macOS 上真 `sandbox-exec`。
 
-### 5.3 无法本机自动化的项
+### 4.3 无法本机自动化的项
 
 N12（Linux 221 基线）在本机**无法验证**：当前只有 macOS 运行时，无 `docker` / `podman` / `limactl`。工程上的替代性保障：
 
@@ -425,7 +423,7 @@ N12（Linux 221 基线）在本机**无法验证**：当前只有 macOS 运行�
 
 即便如此，N12 仍需在具备 Linux 环境的机器上最终确认，标 `MANUAL_ACK_REQUIRED`，不因本机跑不了而视为通过。
 
-### 5.4 优先级与规模（design §11.4）
+### 4.4 优先级与规模（design §11.4）
 
 | 优先级 | 测试 | 理由 |
 |---|---|---|
@@ -435,7 +433,7 @@ N12（Linux 221 基线）在本机**无法验证**：当前只有 macOS 运行�
 
 合计 **60 个测试函数**（逐条列名可对账，无重复无遗漏）；含 B1 的 3×4 参数化与 E1 的 12 例矩阵，实际执行用例数约 **100+**。**H7 = N1/N2，H8 = 能力缺失 auto-skip，H9 = N12。**
 
-### 5.5 用 review 的 P0 反查覆盖
+### 4.5 用 review 的 P0 反查覆盖
 
 | review P0 | 能抓住它的测试 |
 |---|---|
@@ -443,6 +441,63 @@ N12（Linux 221 基线）在本机**无法验证**：当前只有 macOS 运行�
 | P0-2 `SandboxConfig` 加字段破窗 | N1（`src/cli.rs:596` 字面量构造直接编译失败） |
 | P0-3 `classify_exit` 拿不到 stderr | N8 的 G5（拒绝但 rc=0） |
 | P0-4 `bool` 表达不了「预设 + 显式关」 | N4 的 A4 |
+
+---
+
+## 5. 风险与回滚
+
+### 5.1 `DenyMechanism` 加变体的 breaking change
+
+| 项 | 内容 |
+|---|---|
+| 风险 | `src/lib.rs:122` `pub enum DenyMechanism { Landlock, Seccomp, Unknown }` 加 `Seatbelt`。全库无 `match mechanism`（已核实），**仓库内无编译风险**；但它是 `pub enum` 且无 `#[non_exhaustive]`，下游若对它做穷尽 `match` 会编译失败 |
+| 概率 | 中低。下游通常只 `if let Denied { mechanism, .. }` 或 `==` 比较 |
+| 缓解 | ① 与 `SandboxConfig` 的 `#[non_exhaustive]` 一并加（同一 breaking change 窗口，一次付清）；② CHANGELOG 标注 breaking；③ 版本号 `0.0.2` → `0.1.0` |
+| 回滚 | 单行删除变体 + 删除 macOS 分支即可；不涉及数据迁移 |
+
+### 5.2 `SandboxConfig` 加字段的 breaking change
+
+| 项 | 内容 |
+|---|---|
+| 风险 | `src/config.rs:24` 加 `pub macos: MacOsConfig`。`SandboxConfig` **无 `#[non_exhaustive]`**，所有用结构体字面量构造的下游代码编译失败 |
+| 仓库内受影响点（已核实） | `src/cli.rs:596`（全字段字面量）❌ 必须改；`tests/landlock_test.rs:514`（`..Default::default()`）✅ 幸免；`examples/cli_from_toml.rs:75`（`Default` + `with_*`）✅ 幸免 |
+| 缓解 | 加 `#[non_exhaustive]`；CHANGELOG + README 升级说明给出「改用 `..Default::default()`」 |
+| 回滚 | 删除字段 + `src/cli.rs:596` 对应行 |
+
+### 5.3 `sandbox-exec` 未来被移除
+
+| 项 | 内容 |
+|---|---|
+| 风险 | `/usr/bin/sandbox-exec` 与 `sandbox_init` 均被 Apple 标记 deprecated，未来系统版本可能移除。稳态依赖一个外部程序，比库调用多一层系统依赖 |
+| 缓解 | ① `spawn` 时探测存在性，缺失即 `bail!`，**绝不静默降级为无沙箱**（F8；重蹈 `sandbox_init` fail-open 覆车）；② `check` 输出 `Seatbelt (sandbox-exec) available|missing`；③ 施加面收敛为「`build() → Plan` + 拼一条 `Command`」，替换为 `sandbox_init` 只需在 **fork 前**把 profile `CString` 化（满足 ADR 0003 零堆约束），改动局限在 `MacSandbox::spawn`，不触及生成器与配置面；④ 届时**必须保留**返回码硬错误：`rc != 0` 立即 `_exit(1)`，绝不继续执行 |
+| 回滚 | 无需回滚动作（探测即 fail-closed，行为是「报错」而非「不安全」） |
+
+### 5.4 本机无法验证 Linux 基线（N12）
+
+| 项 | 内容 |
+|---|---|
+| 风险 | 本机只有 macOS 运行时，`docker` / `podman` / `limactl` 全无，无法在本机跑 221 测试基线。「Linux 零回归」是设计的第一承诺，却缺少本机证据 |
+| 缓解 | ① 所有 Linux 侧改动都是 `cfg` 门控 + 一条依赖声明，无代码路径变更；② N13 双向 grep + `git diff src/linux/` 空；③ `src/lib.rs:169` / `:189` 的 Linux 分支要求 diff 为空，review 逐行核对；④ 交付前在具备 Linux 环境的机器上跑一次 `cargo test` 并记录 |
+| 回滚 | 若 Linux 回归：`git checkout src/lib.rs src/config.rs Cargo.toml`（改动集中在 3 个文件的少数行，回滚面小） |
+
+### 5.5 其余残余风险（design §13.2）
+
+| # | 风险 | 缓解 |
+|---|---|---|
+| 1 | **读侧零隔离**（预设默认 `All`）：凭据保护是黑名单，漏一个即泄漏；`--mac-write` 可反向放通 | `check` / README 写死；B8 golden 锁死清单；需真隔离时用 `MacReadMode::Only` |
+| 2 | **顺序敏感**：一次「调换两行」静默放开策略 | 生成器固定顺序 + **全平台**段序断言 B1（§4.1） |
+| 3 | 归因弱于 Linux（无 `(nr, arch)`） | `DenyMechanism::Seatbelt` + 精度分级（Probable/Certain） |
+| 4 | 65/134 与目标程序自身退出码歧义 | 65 需 stderr 含 `sandbox-exec:` 才判 `InternalError`；134 归 `Denied` 但标「可能」（G2/G3/G4） |
+| 5 | **setuid 程序不可用**（`ps`/`top`/`su`/`crontab` 5/5 全拒，任何 SBPL 规则都放不通——是 `sandbox-exec` 自身硬限制） | `check` 单列（§N11）；`execute` 检测 `execvp() failed: Operation not permitted` 时提示可能是 setuid 限制 |
+| 6 | 双配置面心智负担（`--landlock` 在 macOS 报错） | `check` 输出平台可用面；错误消息给出对应 `--mac-*` 建议（H3） |
+| 7 | `FullAccess` + `deny network*` 依赖后写赢 | 独立 golden 用例锁死顺序（B1 矩阵含此组合） |
+| 8 | **预开 fd 绕过策略** | `pre_exec` fd 清扫，保留集合 fork 前算好（§2.6） |
+| 9 | **语义失效静默通过** | canary 预检，每配置一次；无可探时显式警告（F4/F5/F6/F7） |
+| 10 | 无 CI 覆盖 macOS | 生成器纯函数化 + 段序断言全平台可测（覆盖 ~70% 逻辑）+ 每版手工冒烟 |
+| 11 | `NetAccess` 与 `NetworkConfig.loopback` 概念重叠 | 文档加 Linux/macOS 网络语义对照表 |
+| 12 | canary 缓存跨实例失效（`Sandbox::from_config` 每次新建 `MacSandbox`） | 文档明确「同配置只跑一次」的实际生命周期，不承诺跨进程缓存（review P1 已指出） |
+
+**实现量估算**：`config.rs` ~250 行、`sbpl.rs` ~280 行、实现侧（mod/imp）~380 行、校验 + CLI ~150 行、测试 ~350 行，合计 **~1160 行**；另加 `Cargo.toml` 一条 target 依赖、12 个测试文件的 `#![cfg]`、`syscall_probe` 的分支 `main`。**Linux 行为零变化**。
 
 ---
 
@@ -473,60 +528,3 @@ N12（Linux 221 基线）在本机**无法验证**：当前只有 macOS 运行�
 - `PlatformConfig` 枚举重构（`enum PlatformConfig { Linux(..), MacOs(..) }`）：review 已判定本轮不做，会破坏全部既有 `with_landlock` 等 API；记录为「第三个平台出现时」的演进压力点。
 - 进程信息隔离（`(deny process-info*)` 的进程可见性控制）：design §1 范围外。
 - `seabox check --json`。
-
----
-
-## 7. 风险与回滚
-
-### 7.1 `DenyMechanism` 加变体的 breaking change
-
-| 项 | 内容 |
-|---|---|
-| 风险 | `src/lib.rs:122` `pub enum DenyMechanism { Landlock, Seccomp, Unknown }` 加 `Seatbelt`。全库无 `match mechanism`（已核实），**仓库内无编译风险**；但它是 `pub enum` 且无 `#[non_exhaustive]`，下游若对它做穷尽 `match` 会编译失败 |
-| 概率 | 中低。下游通常只 `if let Denied { mechanism, .. }` 或 `==` 比较 |
-| 缓解 | ① 与 `SandboxConfig` 的 `#[non_exhaustive]` 一并加（同一 breaking change 窗口，一次付清）；② CHANGELOG 标注 breaking；③ 版本号 `0.0.2` → `0.1.0` |
-| 回滚 | 单行删除变体 + 删除 macOS 分支即可；不涉及数据迁移 |
-
-### 7.2 `SandboxConfig` 加字段的 breaking change
-
-| 项 | 内容 |
-|---|---|
-| 风险 | `src/config.rs:24` 加 `pub macos: MacOsConfig`。`SandboxConfig` **无 `#[non_exhaustive]`**，所有用结构体字面量构造的下游代码编译失败 |
-| 仓库内受影响点（已核实） | `src/cli.rs:596`（全字段字面量）❌ 必须改；`tests/landlock_test.rs:514`（`..Default::default()`）✅ 幸免；`examples/cli_from_toml.rs:75`（`Default` + `with_*`）✅ 幸免 |
-| 缓解 | 加 `#[non_exhaustive]`；CHANGELOG + README 升级说明给出「改用 `..Default::default()`」 |
-| 回滚 | 删除字段 + `src/cli.rs:596` 对应行 |
-
-### 7.3 `sandbox-exec` 未来被移除
-
-| 项 | 内容 |
-|---|---|
-| 风险 | `/usr/bin/sandbox-exec` 与 `sandbox_init` 均被 Apple 标记 deprecated，未来系统版本可能移除。稳态依赖一个外部程序，比库调用多一层系统依赖 |
-| 缓解 | ① `spawn` 时探测存在性，缺失即 `bail!`，**绝不静默降级为无沙箱**（F8；重蹈 `sandbox_init` fail-open 覆车）；② `check` 输出 `Seatbelt (sandbox-exec) available|missing`；③ 施加面收敛为「`build() → Plan` + 拼一条 `Command`」，替换为 `sandbox_init` 只需在 **fork 前**把 profile `CString` 化（满足 ADR 0003 零堆约束），改动局限在 `MacSandbox::spawn`，不触及生成器与配置面；④ 届时**必须保留**返回码硬错误：`rc != 0` 立即 `_exit(1)`，绝不继续执行 |
-| 回滚 | 无需回滚动作（探测即 fail-closed，行为是「报错」而非「不安全」） |
-
-### 7.4 本机无法验证 Linux 基线（N12）
-
-| 项 | 内容 |
-|---|---|
-| 风险 | 本机只有 macOS 运行时，`docker` / `podman` / `limactl` 全无，无法在本机跑 221 测试基线。「Linux 零回归」是设计的第一承诺，却缺少本机证据 |
-| 缓解 | ① 所有 Linux 侧改动都是 `cfg` 门控 + 一条依赖声明，无代码路径变更；② N13 双向 grep + `git diff src/linux/` 空；③ `src/lib.rs:169` / `:189` 的 Linux 分支要求 diff 为空，review 逐行核对；④ 交付前在具备 Linux 环境的机器上跑一次 `cargo test` 并记录 |
-| 回滚 | 若 Linux 回归：`git checkout src/lib.rs src/config.rs Cargo.toml`（改动集中在 3 个文件的少数行，回滚面小） |
-
-### 7.5 其余残余风险（design §13.2）
-
-| # | 风险 | 缓解 |
-|---|---|---|
-| 1 | **读侧零隔离**（预设默认 `All`）：凭据保护是黑名单，漏一个即泄漏；`--mac-write` 可反向放通 | `check` / README 写死；B8 golden 锁死清单；需真隔离时用 `MacReadMode::Only` |
-| 2 | **顺序敏感**：一次「调换两行」静默放开策略 | 生成器固定顺序 + **全平台**段序断言 B1（§5.1） |
-| 3 | 归因弱于 Linux（无 `(nr, arch)`） | `DenyMechanism::Seatbelt` + 精度分级（Probable/Certain） |
-| 4 | 65/134 与目标程序自身退出码歧义 | 65 需 stderr 含 `sandbox-exec:` 才判 `InternalError`；134 归 `Denied` 但标「可能」（G2/G3/G4） |
-| 5 | **setuid 程序不可用**（`ps`/`top`/`su`/`crontab` 5/5 全拒，任何 SBPL 规则都放不通——是 `sandbox-exec` 自身硬限制） | `check` 单列（§N11）；`execute` 检测 `execvp() failed: Operation not permitted` 时提示可能是 setuid 限制 |
-| 6 | 双配置面心智负担（`--landlock` 在 macOS 报错） | `check` 输出平台可用面；错误消息给出对应 `--mac-*` 建议（H3） |
-| 7 | `FullAccess` + `deny network*` 依赖后写赢 | 独立 golden 用例锁死顺序（B1 矩阵含此组合） |
-| 8 | **预开 fd 绕过策略** | `pre_exec` fd 清扫，保留集合 fork 前算好（§2.6） |
-| 9 | **语义失效静默通过** | canary 预检，每配置一次；无可探时显式警告（F4/F5/F6/F7） |
-| 10 | 无 CI 覆盖 macOS | 生成器纯函数化 + 段序断言全平台可测（覆盖 ~70% 逻辑）+ 每版手工冒烟 |
-| 11 | `NetAccess` 与 `NetworkConfig.loopback` 概念重叠 | 文档加 Linux/macOS 网络语义对照表 |
-| 12 | canary 缓存跨实例失效（`Sandbox::from_config` 每次新建 `MacSandbox`） | 文档明确「同配置只跑一次」的实际生命周期，不承诺跨进程缓存（review P1 已指出） |
-
-**实现量估算**：`config.rs` ~250 行、`sbpl.rs` ~280 行、实现侧（mod/imp）~380 行、校验 + CLI ~150 行、测试 ~350 行，合计 **~1160 行**；另加 `Cargo.toml` 一条 target 依赖、12 个测试文件的 `#![cfg]`、`syscall_probe` 的分支 `main`。**Linux 行为零变化**。

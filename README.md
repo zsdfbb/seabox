@@ -1,10 +1,10 @@
 # seabox
 
-一个为 **AI Agent** 设计的**跨平台 OS 级沙箱**：在操作系统层面强制施加文件系统与进程限制，**无需容器运行时**。当前支持 **Linux**，macOS（Seatbelt）与更多平台在规划中。
+一个为 **AI Agent** 设计的**跨平台 OS 级沙箱**：在操作系统层面强制施加文件系统与进程限制，**无需容器运行时**。当前支持 **Linux**（Landlock + seccomp + namespaces）与 **macOS**（Seatbelt）。
 
 **设计目标**：让 Agent 的命令执行默认受限，用可声明的策略建立安全边界。
 
-- 跨平台：平台无关的 `Sandbox` trait，各平台用原生机制实现（Linux = Landlock + seccomp + namespaces；macOS = Seatbelt 规划中）
+- 跨平台：平台无关的 `Sandbox` trait，各平台用原生机制实现（Linux = Landlock + seccomp + namespaces；macOS = Seatbelt / SBPL + `sandbox-exec`）
 - 文件系统：**Landlock ACL**（路径级读/写/执行，声明式、零挂载）
 - 进程隔离：**7 种 namespace**（user/ipc/mnt/pid/net/uts/cgroup）
 - syscall 过滤：**动态 seccomp**（精确拦截 + USER_NOTIF 结构化诊断）
@@ -42,6 +42,41 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 |---|---|---|
 | Linux 5.13+ | ✅ | Landlock + seccomp + namespaces |
 | Linux 3.5 – 5.12 | ⚠️ 部分可用 | seccomp（无 Landlock 文件系统限制） |
+| macOS 10.5+ | ✅ | Seatbelt（SBPL + `sandbox-exec`） |
+
+两个后端的配置面**双向互斥**，误用会硬错误而不是静默忽略：macOS 上 `--landlock` / `--unshare-*` /
+`--seccomp-*` / `--cap-*` / `--bind` 均报错并提示改用 `--mac-*`；Linux 上 `--mac-*` 报错并提示改用 `--landlock`。
+
+### macOS 快速上手
+
+```bash
+# 三种预设
+seabox run --mac-preset read-only       -- ls /etc          # 读全盘，仅 TMPDIR 可写
+seabox run --mac-preset workspace-write -- cargo build       # 可写 cwd + TMPDIR
+seabox run --mac-preset full-access     -- make              # 不限制（仍有硬限制，见下）
+
+# 自定义：预设只填默认值，字段总能覆盖或追加
+seabox run --mac-preset workspace-write --mac-write ~/.cargo -- cargo build
+seabox run --mac-write ./target --mac-write ~/.cargo -- cargo build   # 无预设，走安全基线
+
+# 读写隔离
+seabox run --mac-read /usr --mac-read /System --mac-read $PWD -- ls
+```
+
+`--mac-read PATH` **出现即切到 `Only` 模式**（真正的读隔离，仅 macOS 可用）。
+预设默认是 `All`（读全盘 + 凭据黑名单），只有显式给 `--mac-read` 才收窄。
+
+**注意 `--mac-write` 是递归的**，含整棵子树与删除权。
+
+#### macOS 的硬限制（任何 profile 都放不通）
+
+| 限制 | 细节 |
+|---|---|
+| **setuid 程序不可用** | `ps` `top` `su` `atq` `crontab` `newgrp` 全部被拒 |
+| **SIP 路径不可写** | `/etc` `/System` 等仍受系统保护 |
+
+`seabox check` 会单独列出这两条。也正因如此，「不配预设」实现为**不进入 `sandbox-exec`**，
+以免白白损失 `ps` 这类排障工具的能力。
 
 ## 安装
 
@@ -275,7 +310,7 @@ cargo test -- --nocapture           # 显示 stdout
 | 1 | Core + Linux 文件系统隔离（Landlock + seccomp + CLI） | ✅ 已完成 |
 | 2 | Linux 完整进程隔离（7 种 namespace + mount ns + 动态 seccomp + 网络隔离） | ✅ 已完成 |
 | 2b | IP 级网络过滤（eBPF / nftables） | ⏸️ 已搁置（待 Phase 4 评估） |
-| 3 | macOS 支持（Seatbelt） | 💡 计划中 |
+| 3 | macOS 支持（Seatbelt） | ✅ 已完成 |
 | 4 | CodeWhale 集成 + HTTP API | 💡 计划中（HTTP API 经调研后暂缓，倾向本地 helper / Crate API 接入） |
 
 详见 [docs/development-phases.md](docs/development-phases.md)。
@@ -283,8 +318,14 @@ cargo test -- --nocapture           # 显示 stdout
 ## 已知限制
 
 - **`serve` 子命令未实现**：HTTP API 方向经调研后暂缓——HTTP sandbox API 是"远程 microVM/容器沙箱"市场的标配，与本地 OS 沙箱的定位不符。
-- **macOS 未实现**：仅 Linux 后端可用。
-- **无高层策略预设**：当前需用户逐条指定 `--landlock` 规则。
+- **macOS 后端在纵深防御上弱于 Linux**：Seatbelt 无 syscall 过滤、无 namespace、无 capability，
+  且读侧默认零隔离（`MacReadMode::All`）。文件系统写隔离与凭据保护两边都完整。
+- **macOS 的网络策略不支持域名与具体 IP**：SBPL 语法层只接受 `*` 与 `localhost`，
+  端口可以精确到号。按域名放行需旁路方案（本地代理），本轮不实现。
+- **macOS 上 CLI 的拒绝归因只能看退出码**：CLI 走流式 `spawn(Inherit)` 拿不到 stderr，
+  被 Seatbelt 拒绝的命令会显示为普通非零退出。用库 API `Sandbox::execute()` 才能拿到
+  结构化的 `Denied { mechanism: Seatbelt, .. }`。这是已知能力降级。
+- **无高层策略预设（Linux）**：Linux 侧仍需用户逐条指定 `--landlock` 规则；macOS 侧已有三种预设。
 - **网络仅 namespace 级隔离**：只有全断 / loopback 二态，无 IP 级过滤（Phase 2b 搁置）。
 - **seccomp 无默认黑名单**：需显式用 `--seccomp-deny-nr` 指定要拦截的 syscall。
 

@@ -1,6 +1,8 @@
 # macOS 沙箱策略
 
-**当前状态：计划中，尚未实现。** 当前所有代码仅为 Linux 后端 (Landlock + seccomp)。
+**当前状态：已实现（macOS 27.0.1 / arm64 实测通过）。** 施加侧为 `/usr/bin/sandbox-exec`，
+配置层（`src/macos/config.rs`）与 SBPL 生成器（`src/macos/sbpl.rs`）无条件编译（Linux CI 可单测），
+实现侧（`src/macos/imp.rs`）由 `#[cfg(target_os = "macos")]` 整模块门控。
 
 > 完整设计见 [`docs/arch/macos-seatbelt/`](arch/macos-seatbelt/)（[context](arch/macos-seatbelt/context.md) · [design](arch/macos-seatbelt/design.md)，关键技术决策见 design.md 附录 A）。
 > 本文是速查摘要；两条早期结论已被 macOS 27.0.1 实测推翻，见下方「已修正的错误结论」。
@@ -86,7 +88,13 @@ setuid 被拒的错误形态是 `sandbox-exec: execvp() of '/usr/bin/atq' failed
 `(remote ip "example.com:443")` 与 `(remote ip "1.1.1.1:*")` 均报
 `sandbox-exec: host must be * or localhost in network address`。
 
-因此 macOS 上「按域名放行」需要旁路方案（本地代理 + 只放通到代理端口），本轮不实现。
+也就是说：`network-outbound` 的 `remote ip` 只接受 `*` 与 `localhost` 两个主机值，
+端口位可以精确到具体号（如 `"*:443"`）。这是 **SBPL 语法层**的限制，不是政策选择——
+无法靠改参数绕过。因此 macOS 上「按域名放行」需要旁路方案（本地代理 + 只放通到代理端口），本轮不实现。
+
+> 实现位置：`src/macos/sbpl.rs` 的 `push_network`，`NetAccess::Ports` 生成
+> `(allow network-outbound (remote ip "*:443"))`，并**恒定附带** mDNSResponder unix-socket
+>（漏掉它则沙箱内 DNS 解析失败，`curl` 报 rc=6）。
 
 ## 拒绝检测
 
@@ -119,6 +127,25 @@ macOS 后端在纵深防御上**弱于** Linux：无 syscall 过滤、无 namesp
 
 1. ~~「macOS 的网络策略只有 on/off，不支持细粒度」~~ → **错**。Seatbelt 支持端口精确匹配、unix-socket、inbound/outbound 分离。真正不支持的是**域名与具体 IP**。
 2. ~~缺「窄白名单 → abort(134)」这一关键行为~~ → **已补**。只给 `/usr` `/System` `/bin` 等系统路径时，`/bin/sh` 直接 abort(exit 134)，内核日志 `deny(1) file-read-data /`。必须有 `(allow file-read* (literal "/"))` 起步，而 Apple 的 `system.sb` 在本机不存在，无法 import。
+
+### 补充：白名单过窄的真实失败形态是 abort(134)，不是「权限不足」
+
+这一条极易误诊，单独说明。读白名单只列 `/usr` `/System` `/bin` 等目录时，
+`/bin/sh` **不会**报 `Operation not permitted`，而是直接 **abort（exit 134 = 128+SIGABRT）**：
+
+```
+$ sandbox-exec -p '(version 1)(deny default)(allow file-read* (subpath "/usr"))' -- /bin/sh -c 'echo hi'
+Abort trap: 6          # exit 134
+# 内核日志：deny(1) file-read-data /
+```
+
+原因是 dyld 在加载阶段需要读根目录 `/` 本身（`file-read-data /`），拿不到就 abort。
+所以 `MacReadMode::Only` 必须自动补两条：`(allow file-read* (literal "/"))` 与
+符号链接项 `(literal "/etc")` `(literal "/tmp")`。
+
+因此 `classify_output` 把 **134 归为 `Denied{Seatbelt}`** 并在 message 里标「可能」——
+宁可误报拒绝，不可误报成功。若你的命令莫名其妙 abort 而 stderr 无任何权限提示，
+先查读白名单是否过窄。
 
 另需注意：
 - **规则顺序敏感（后写赢）**，与 specificity 无关——`deny_read` 必须写在写白名单之后。见 [design.md §6.1](arch/macos-seatbelt/design.md)。
