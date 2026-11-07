@@ -41,12 +41,17 @@
 
 Phase 2b 原与 Phase 3、4 并行，现明确降级为 Phase 4 的前置依赖。
 
-## Phase 3 — macOS 支持（💡 计划中）
+## Phase 3 — macOS 支持（💡 设计完成，待实现）
 
-- Seatbelt profile 动态生成
-- `sandbox-exec` 包装
-- 拒绝检测
-- 跨平台 `Sandbox` enum（`Linux | MacOs | None`）
+- Seatbelt profile 动态生成（`src/macos/sbpl.rs`，无 `cfg` 门控，Linux CI 可单测）
+- `sandbox-exec -p` 施加（fail-closed；否决 `sandbox_init` 的 fail-open）
+- 三种预设：`ReadOnly` / `WorkspaceWrite`(默认) / `FullAccess`，网络维度正交
+- 拒绝检测：`DenyMechanism::Seatbelt` + `log show` 归因
+- **复用既有 `SandboxImpl` trait**，新增 `MacSandbox`/`MacChild` 实现——不引入跨平台 `Sandbox` enum
+  （trait 已就位，`create_sandbox_impl()` 加一个分支即可）
+- 配置面分离（决策 D1）：macOS 专属 `--mac-*` / `MacOsConfig`，Linux 机制在 macOS 上硬错误
+
+设计见 `docs/arch/macos-seatbelt/`（context 实测基线 + design 主设计稿，关键技术决策见 design.md 附录 A）。
 
 ## Phase 4 — CodeWhale 集成（✅ 库级后端集成已完成；HTTP API 仍暂缓）
 
