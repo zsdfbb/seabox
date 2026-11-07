@@ -103,13 +103,21 @@ seabox/
 │   │   ├── mount.rs            # RawMountOp + do_mounts + make_private
 │   │   ├── net.rs              # netns + loopback 配置（SIOCSIFADDR）
 │   │   └── seccomp.rs          # BPF filter + USER_NOTIF + prctl 安装
+│   ├── macos/
+│   │   ├── mod.rs              # macos 模块导出（无条件编译）
+│   │   ├── config.rs           # MacOsConfig / MacPreset / ResolvedPolicy（无条件编译）
+│   │   ├── sbpl.rs             # SBPL profile 生成，7 段固定顺序（无条件编译）
+│   │   └── imp.rs              # MacSandbox，仅 #[cfg(target_os = "macos")]
 │   └── bin/
-│       └── syscall_probe.rs    # seccomp 测试辅助二进制
+│       └── syscall_probe.rs    # seccomp 测试辅助二进制（非 Linux 退 77）
 ├── tests/
 │   ├── config_test.rs          # 配置解析测试
 │   ├── concurrent_fork_test.rs # fork 后零堆操作（多线程安全）
 │   ├── deny_detect_test.rs     # ExitReason 分类测试
 │   ├── landlock_test.rs        # Landlock ACL 测试（需要 5.13+）
+│   ├── macos_cli_e2e_test.rs   # macOS CLI 端到端（退出码/参数切分/fd 逃逸）
+│   ├── macos_config_test.rs    # --mac-* flag 解析 + 双向硬错误
+│   ├── macos_test.rs           # Seatbelt 预设语义（库 API）
 │   ├── mount_test.rs           # mount namespace 集成测试
 │   ├── namespace_test.rs       # 21 个命名空间端到端测试
 │   ├── network_test.rs         # 网络隔离 + loopback 控制测试
@@ -189,10 +197,22 @@ cargo check
 | `tests/mount_test.rs` | mount ns（`--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`） | Linux |
 | `tests/network_test.rs` | netns 隔离 + `--allow-network` loopback 放通 | Linux |
 | `tests/concurrent_fork_test.rs` | fork 后子进程零堆操作（多线程安全） | Linux |
+| `tests/macos_config_test.rs` | 12 个 `--mac-*` flag 解析/映射 + 双向硬错误（N9/N10/H1-H3） | macOS + Linux |
+| `tests/macos_test.rs` | Seatbelt 预设语义 + 凭据拒绝 + fd 逃逸 + canary + business-pid（D/F/H 组，**库 API**） | macOS |
+| `tests/macos_cli_e2e_test.rs` | **CLI 端到端**：退出码映射（0/`Program`/124）+ 参数切分 + `--chdir` + 管道 + fd 逃逸 | macOS |
 
 跳过与预检：
 - 内核能力缺失时（无 Landlock / 无 seccomp / 无 namespace）测试**自动跳过**（打印 `Landlock not available, skipping test`），不是 fail。
 - 真正会写入主机或触发特权操作的测试在跑前先做**探针**：跑一次已知应被拒绝的操作确认机制生效。探针结果用 `OnceLock` 缓存。
+- macOS 测试：`/usr/bin/sandbox-exec` 缺失时同样**自动跳过**。
+  「应当被拒」的写目标**绝不能**建在 `$TMPDIR`（预设故意放通 TMPDIR），
+  必须用 `$HOME` 下自建临时目录（见 `tests/macos_cli_e2e_test.rs` 的 `HomeScratch`）。
+
+> **macOS 有两层测试，分工不能混**：`macos_test.rs` 走库 API（`Sandbox::execute`，
+> 内部 `Piped`）才能拿到结构化 `Denied { mechanism: Seatbelt, .. }`；
+> `macos_cli_e2e_test.rs` 走二进制（`spawn(Inherit)`，**拿不到 stderr**），
+> 因此拒绝只能断言「非零退出 + stderr 含拒绝原因」，拿不到 126。
+> 这是 design §10.2 声明的已知能力降级，不是测试缺陷。
 
 辅助二进制 `src/bin/syscall_probe.rs`：
 - 接受 `syscall_nr [arg0..arg5]`，直接调用 `libc::syscall`。
