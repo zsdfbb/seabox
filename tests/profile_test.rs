@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! coding-agent profile 集成测试。
 //!
 //! 验证 `@file` 展开 + `SandboxConfig::from_flag_args` 与 CLI 走同一解析管线。

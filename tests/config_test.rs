@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! SandboxConfig 的集成测试。
 //!
 //! 这些测试覆盖公开的 `seabox::config` API。

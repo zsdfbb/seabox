@@ -13,6 +13,7 @@ use std::time::Duration;
 use clap::{CommandFactory, FromArgMatches, Parser};
 
 use crate::config::{parse_landlock_spec, NamespacesConfig, SandboxConfig};
+use crate::macos::config::MacOsConfig;
 
 /// 解析 `KEY=VALUE` 格式的环境变量，返回 `(key, value)`。
 fn parse_env_var(s: &str) -> Result<(String, String), String> {
@@ -303,6 +304,58 @@ pub enum Cli {
         #[arg(long, value_name = "FD")]
         seccomp_filter_fd: Vec<std::os::fd::RawFd>,
 
+        // ── macOS Seatbelt（仅在 macOS 生效；Linux 上给出硬错误建议）──
+        /// macOS 预设：read-only | workspace-write | full-access
+        ///
+        /// 预设只填默认值，任何 `--mac-*` 字段都可覆盖对应项。
+        /// 不指定任何 `--mac-*` 且无预设 ⇒ 不施加 Seatbelt（与 Linux 空 --landlock 一致）。
+        #[arg(long, value_name = "NAME")]
+        mac_preset: Option<String>,
+
+        /// macOS 可写目录（可重复；递归含整棵子树与删除权）
+        #[arg(long, value_name = "PATH")]
+        mac_write: Vec<String>,
+
+        /// macOS 写拒绝目录（可重复；后写赢，嵌在 --mac-write 之后）
+        #[arg(long, value_name = "PATH")]
+        mac_deny_write: Vec<String>,
+
+        /// workspace-write 预设的写根（默认 cwd）
+        #[arg(long, value_name = "DIR")]
+        mac_workspace: Option<String>,
+
+        /// macOS 读白名单（可重复；出现即切到 Only 模式，实现真正读隔离）
+        #[arg(long, value_name = "PATH")]
+        mac_read: Vec<String>,
+
+        /// macOS 读全开（默认；显式覆盖更早的 --mac-read）
+        #[arg(long)]
+        mac_read_all: bool,
+
+        /// macOS 读拒绝目录（可重复；叠加在内置凭据清单之上）
+        #[arg(long, value_name = "PATH")]
+        mac_deny_read: Vec<String>,
+
+        /// 关闭 macOS 内置凭据拒绝清单（逃生门；默认开启）
+        #[arg(long)]
+        mac_no_credential_deny: bool,
+
+        /// 不在 workspace 内放行 .git 写（默认放行；关闭后 git add 会失败于 index.lock）
+        #[arg(long)]
+        mac_no_git_write: bool,
+
+        /// TMPDIR 不可写（默认在预设下可写）
+        #[arg(long)]
+        mac_no_tmp_writable: bool,
+
+        /// macOS 网络：deny | loopback | all | 端口列表如 443,80
+        #[arg(long, value_name = "SPEC")]
+        mac_net: Option<String>,
+
+        /// 放通 macOS loopback 入站连接
+        #[arg(long)]
+        mac_net_inbound: bool,
+
         /// 要执行的命令（使用 `--` 分隔选项与命令）
         ///
         /// 示例：seabox run --landlock '/:ro' -- ls -la
@@ -338,6 +391,52 @@ pub struct RunSpec {
     pub chdir: Option<PathBuf>,
     pub env: HashMap<String, String>,
     pub timeout: Duration,
+}
+
+/// 解析 `--mac-preset` 的取值。
+fn parse_mac_preset(s: &str) -> anyhow::Result<crate::macos::config::MacPreset> {
+    use crate::macos::config::MacPreset;
+    match s {
+        "read-only" => Ok(MacPreset::ReadOnly),
+        "workspace-write" => Ok(MacPreset::WorkspaceWrite),
+        "full-access" => Ok(MacPreset::FullAccess),
+        other => anyhow::bail!(
+            "unknown --mac-preset {:?}; expected read-only | workspace-write | full-access",
+            other
+        ),
+    }
+}
+
+/// 解析 `--mac-net` 的取值。
+fn parse_mac_net(s: &str) -> anyhow::Result<crate::macos::config::NetAccess> {
+    use crate::macos::config::NetAccess;
+    match s {
+        "deny" => Ok(NetAccess::Deny),
+        "loopback" => Ok(NetAccess::Loopback),
+        "all" => Ok(NetAccess::All),
+        ports => {
+            let mut out = Vec::new();
+            for item in ports.split(',') {
+                let item = item.trim();
+                if item.is_empty() {
+                    continue;
+                }
+                let p: u16 = item.parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "invalid port {:?} in --mac-net; expected deny | loopback | all | comma-separated ports",
+                        item
+                    )
+                })?;
+                out.push(p);
+            }
+            if out.is_empty() {
+                anyhow::bail!(
+                    "empty port list in --mac-net; expected deny | loopback | all | comma-separated ports"
+                );
+            }
+            Ok(NetAccess::Ports(out))
+        }
+    }
 }
 
 /// 从已解析的 `Cli` 构建 `(SandboxConfig, RunSpec)`。
@@ -380,6 +479,18 @@ pub fn parse_run(
         cap_inherit,
         timeout,
         timeout_max,
+        mac_preset,
+        mac_write,
+        mac_deny_write,
+        mac_workspace,
+        mac_read,
+        mac_read_all,
+        mac_deny_read,
+        mac_no_credential_deny,
+        mac_no_git_write,
+        mac_no_tmp_writable,
+        mac_net,
+        mac_net_inbound,
     } = cli
     else {
         anyhow::bail!("expected run subcommand");
@@ -405,6 +516,97 @@ pub fn parse_run(
         anyhow::bail!("--hostname requires --unshare-uts or --unshare-all");
     }
 
+    // ── macOS Seatbelt 配置（顺序即语义：预设先填默认，字段逐个覆盖）──
+    let mut macos = MacOsConfig::default();
+    if let Some(p) = mac_preset.as_deref() {
+        macos = macos.with_mac_preset(parse_mac_preset(p)?);
+    }
+    if let Some(ws) = mac_workspace {
+        macos = macos.with_mac_workspace(ws);
+    }
+    for w in &mac_write {
+        macos = macos.with_mac_write(w);
+    }
+    for d in &mac_deny_write {
+        macos = macos.with_mac_deny_write(d);
+    }
+    // 读侧：--mac-read 出现即切 Only；--mac-read-all 显式回到 All（后写赢）
+    if mac_read_all {
+        macos = macos.with_mac_read_all();
+    }
+    for r in &mac_read {
+        macos = macos.with_mac_read(r);
+    }
+    for d in &mac_deny_read {
+        macos = macos.with_mac_deny_read(d);
+    }
+    if mac_no_credential_deny {
+        macos = macos.with_mac_no_credential_deny();
+    }
+    if mac_no_git_write {
+        macos = macos.with_mac_no_git_write();
+    }
+    if mac_no_tmp_writable {
+        macos = macos.with_mac_no_tmp_writable();
+    }
+    if let Some(n) = mac_net.as_deref() {
+        macos = macos.with_mac_net(parse_mac_net(n)?);
+    }
+    if mac_net_inbound {
+        macos = macos.with_mac_net_inbound(true);
+    }
+
+    // design §4.6：macOS 与 Linux 配置面双向互斥。
+    // macOS 特有配置在 Linux 上无法生效，反过来也一样——静默忽略是最差的选择，
+    // 用户会以为已经受限。
+    #[cfg(target_os = "linux")]
+    {
+        if macos.is_configured() {
+            anyhow::bail!(
+                "--mac-* options are macOS-only and have no effect on Linux; \
+                 use --landlock / --unshare-* / --seccomp-deny-nr instead"
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !landlock.is_empty() {
+            anyhow::bail!(
+                "--landlock is Linux-only and has no effect on macOS; \
+                 use --mac-preset / --mac-write / --mac-read instead"
+            );
+        }
+        if unshare_user
+            || unshare_user_try
+            || unshare_all
+            || unshare_ipc
+            || unshare_mnt
+            || unshare_pid
+            || unshare_net
+            || unshare_uts
+            || unshare_cgroup
+            || unshare_cgroup_try
+            || allow_network
+            || share_net
+        {
+            anyhow::bail!(
+                "--unshare-* (namespace isolation) is Linux-only and has no effect on macOS; \
+                 use --mac-preset / --mac-read instead"
+            );
+        }
+        if !seccomp_deny_nr.is_empty() || !seccomp_filter_fd.is_empty() {
+            anyhow::bail!("--seccomp-* is Linux-only and has no effect on macOS");
+        }
+        if !cap_add.is_empty() || !cap_drop.is_empty() || cap_inherit {
+            anyhow::bail!("--cap-* is Linux-only and has no effect on macOS");
+        }
+        if !bind.is_empty() || !ro_bind.is_empty() || !tmpfs.is_empty() {
+            anyhow::bail!(
+                "--bind / --ro-bind / --tmpfs require mount namespaces and are Linux-only"
+            );
+        }
+    }
+
     let (effective_net, effective_network) =
         resolve_network_config(unshare_net, share_net, allow_network, unshare_all);
 
@@ -426,6 +628,7 @@ pub fn parse_run(
         gid,
         hostname,
         timeout_max,
+        macos,
     )?;
 
     // --cap-add / --cap-drop: 按 CLI 顺序应用（含 ALL）。未知 cap 名在此报错。
@@ -574,6 +777,7 @@ fn build_config(
     gid: Option<u32>,
     hostname: Option<String>,
     timeout_max: Option<u64>,
+    macos: MacOsConfig,
 ) -> anyhow::Result<SandboxConfig> {
     let rules = landlock
         .iter()
@@ -621,6 +825,8 @@ fn build_config(
         capabilities: crate::config::CapabilityConfig::default(),
         // D-A7：CLI 默认组杀（process_group=true）。
         process_group: true,
+        // --mac-* flag 解析结果（parse_run 中构建）；不配则不施加 Seatbelt。
+        macos,
     })
 }
 

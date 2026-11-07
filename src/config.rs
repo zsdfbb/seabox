@@ -5,6 +5,7 @@
 //! 以及用于路径展开的 [`expand_tilde`]、权限展开的 [`expand_perm`]、
 //! landlock 规格解析的 [`parse_landlock_spec`] 等工具函数。
 
+use crate::macos::config::MacOsConfig;
 use crate::{LandlockPerm, LandlockRule};
 
 // mount(2) flags 数值（不依赖 libc，config 层不需要 libc）
@@ -40,6 +41,11 @@ pub struct SandboxConfig {
     /// `SandboxChild::kill` 的目标粒度——`true` 时组杀（连带子孙进程），
     /// `false` 时只杀 business 进程本身。
     pub process_group: bool,
+    /// macOS Seatbelt 配置（`--mac-*`）。仅在 macOS 生效。
+    ///
+    /// `MacOsConfig::default()` = 未配置 ⇒ 不施加 Seatbelt（直接执行），
+    /// 与 Linux 空 `landlock` 直通一致。见 design §4.0。
+    pub macos: MacOsConfig,
 }
 
 impl Default for SandboxConfig {
@@ -55,6 +61,7 @@ impl Default for SandboxConfig {
             seccomp_filter_bytes: vec![],
             capabilities: CapabilityConfig::default(),
             process_group: true,
+            macos: MacOsConfig::default(),
         }
     }
 }
@@ -151,6 +158,86 @@ impl SandboxConfig {
         self.landlock
             .push(crate::config::parse_landlock_spec(spec)?);
         Ok(self)
+    }
+
+    // ── macOS Seatbelt（`--mac-*`，仅在 macOS 生效）──
+    //
+    // 这一组方法只是把调用委托给 [`MacOsConfig`] 的同名方法，让 `SandboxConfig`
+    // 的链式风格在 macOS 侧保持对称（AGENTS.md「CLI + Crate API 对应」约定）。
+
+    /// 设置 macOS 预设（`--mac-preset`）。仅在 macOS 生效。
+    pub fn with_mac_preset(mut self, preset: crate::macos::config::MacPreset) -> Self {
+        self.macos = self.macos.with_mac_preset(preset);
+        self
+    }
+
+    /// 追加 macOS 可写目录（`--mac-write`）。仅在 macOS 生效。
+    pub fn with_mac_write(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.macos = self.macos.with_mac_write(path);
+        self
+    }
+
+    /// 追加 macOS 写拒绝目录（`--mac-deny-write`）。仅在 macOS 生效。
+    pub fn with_mac_deny_write(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.macos = self.macos.with_mac_deny_write(path);
+        self
+    }
+
+    /// 设置 workspace-write 的**写根**（`--mac-workspace`）。仅在 macOS 生效。
+    ///
+    /// 语义是**替换**而非追加 `WorkspaceWrite` 预设的默认写根（cwd）：
+    /// 若为追加，cwd 仍可写，结果比用户意图更宽——安全方向错误。
+    pub fn with_mac_workspace(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.macos = self.macos.with_mac_workspace(path);
+        self
+    }
+
+    /// 追加 macOS 读白名单（`--mac-read`，出现即切到 `Only` 模式）。仅在 macOS 生效。
+    pub fn with_mac_read(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.macos = self.macos.with_mac_read(path);
+        self
+    }
+
+    /// 把 macOS 读模式显式恢复为全开（`--mac-read-all`，后写赢）。仅在 macOS 生效。
+    pub fn with_mac_read_all(mut self) -> Self {
+        self.macos = self.macos.with_mac_read_all();
+        self
+    }
+
+    /// 追加 macOS 读拒绝目录（`--mac-deny-read`）。仅在 macOS 生效。
+    pub fn with_mac_deny_read(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.macos = self.macos.with_mac_deny_read(path);
+        self
+    }
+
+    /// 设置 macOS 网络访问（`--mac-net`）。仅在 macOS 生效。
+    pub fn with_mac_net(mut self, access: crate::macos::config::NetAccess) -> Self {
+        self.macos = self.macos.with_mac_net(access);
+        self
+    }
+
+    /// 放通 macOS loopback 入站连接（`--mac-net-inbound`）。仅在 macOS 生效。
+    pub fn with_mac_net_inbound(mut self, enabled: bool) -> Self {
+        self.macos = self.macos.with_mac_net_inbound(enabled);
+        self
+    }
+
+    /// 是否放行 macOS `.git` 写（`--mac-no-git-write` 取反）。仅在 macOS 生效。
+    pub fn with_mac_git_write(mut self, enabled: Option<bool>) -> Self {
+        self.macos = self.macos.with_mac_git_write(enabled);
+        self
+    }
+
+    /// TMPDIR 是否可写（`--mac-no-tmp-writable` 取反）。仅在 macOS 生效。
+    pub fn with_mac_tmp_writable(mut self, enabled: Option<bool>) -> Self {
+        self.macos = self.macos.with_mac_tmp_writable(enabled);
+        self
+    }
+
+    /// 关闭 macOS 内置凭据拒绝清单（`--mac-no-credential-deny`）。仅在 macOS 生效。
+    pub fn with_mac_credential_deny(mut self, enabled: Option<bool>) -> Self {
+        self.macos = self.macos.with_mac_credential_deny(enabled);
+        self
     }
 
     /// 启用 user 命名空间隔离。

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use seabox::{CommandSpec, Sandbox};
 use std::sync::{Arc, Barrier};
 use std::thread;

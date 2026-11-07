@@ -22,6 +22,7 @@
 //! - `100 + errno`：syscall 自身返回错误。errno 偏移 100 以避开
 //!   shell 保留码（如 126 sandbox denial、127 command not found）。
 //! - `2`：调用格式错误（参数数量错）。
+//! - `77`：本二进制仅在 Linux 可用（非 Linux 平台一律返回此码）。
 //!
 //! ## 设计意图
 //!
@@ -30,10 +31,29 @@
 //! 因此参数合法性无关紧要。这样能可靠验证"黑名单拦截到位"，而不会被
 //! syscall 自身的失败路径掩盖。
 
+#[cfg(target_os = "linux")]
 use std::env;
+#[cfg(target_os = "linux")]
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
+/// 统一入口：Linux 走真实探针逻辑，其它平台直接报告不支持。
+///
+/// 不能用文件级 `#![cfg(target_os = "linux")]`——`[[bin]]` 无条件声明，
+/// 属性会把 `main` 一并裁掉，导致 E0601 `main function not found`。
+fn main() -> std::process::ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        linux_main()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        eprintln!("syscall_probe is Linux-only");
+        std::process::ExitCode::from(77)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -88,6 +108,7 @@ fn main() -> ExitCode {
 }
 
 /// 把字符串解析为 i64。支持十进制与 `0x` 十六进制前缀。
+#[cfg(target_os = "linux")]
 fn parse_i64(s: &str) -> Result<i64, std::num::ParseIntError> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         i64::from_str_radix(hex, 16)
@@ -100,6 +121,7 @@ fn parse_i64(s: &str) -> Result<i64, std::num::ParseIntError> {
 ///
 /// SAFETY：调用方传入的 syscall 号与参数是有效的 i64；`libc::syscall`
 /// 本身是 unsafe 的 wrapper，其调用安全性由调用方承担。
+#[cfg(target_os = "linux")]
 unsafe fn dispatch_syscall(nr: i64, args: &[i64]) -> i64 {
     match args.len() {
         0 => libc::syscall(nr),
