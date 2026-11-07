@@ -1,6 +1,6 @@
 [package]
 name = "seabox"
-version = "0.0.2"
+version = "0.1.0"
 edition = "2021"
 default-run = "seabox"
 description = "A standalone Rust sandbox tool using Landlock + seccomp for filesystem and syscall isolation"
@@ -9,6 +9,17 @@ readme = "README.md"
 repository = "https://github.com/zsdfbb/seabox"
 keywords = ["sandbox", "landlock", "seccomp", "isolation", "security"]
 categories = ["command-line-utilities", "os"]
+# `Integration/CodeWhale` 是指向仓库外的悬空符号链接（Linux 开发机上的绝对路径目标），
+# `cargo package` 无法归档它（os error 2）。开发文档与集成入口不进入发布物。
+exclude = [
+    "docs/",
+    "Integration/",
+    "tmp/",
+    "CONTEXT.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".claude/",
+]
 
 [features]
 default = ["cli"]

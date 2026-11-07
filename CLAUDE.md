@@ -39,7 +39,7 @@ Agent 会代表用户频繁执行 shell 命令、修改文件、运行构建。�
 - ✅ **Phase 1**：Landlock 文件系统 ACL + seccomp BPF USER_NOTIF + CLI
 - ✅ **Phase 2**：7 种命名空间隔离（User/IPC/Mount/PID/Net/UTS/Cgroup，含 `--unshare-mnt` / `--bind` / `--ro-bind` / `--tmpfs`）+ 动态 seccomp（`--seccomp-deny-nr` / `--seccomp-filter-fd`）+ 网络隔离与 loopback 控制（`--allow-network` / `--share-net`）
 - ⏸️ **Phase 2b**：IP 级网络过滤（原计划 eBPF aya，已搁置待 Phase 4 时重新评估）
-- 🚧 **Phase 3**：macOS Seatbelt 支持
+- ✅ **Phase 3**：macOS Seatbelt 支持（SBPL + `sandbox-exec`，三预设 + 12 个 `--mac-*` flag；Linux 行为零变化）
 - 🚧 **Phase 4**：CodeWhale 集成（**集成对象：个人 fork 版 CodeWhale**，入口 `Integration/CodeWhale` → `/home/zs/Develop/CodeWhale_seabox`，origin `zsdfbb/CodeWhale_seabox`，非上游）+ HTTP API（2026-08 调研后 HTTP API 暂缓——HTTP sandbox API 是"远程 microVM/容器沙箱"市场的标配，与本项目"本地 OS 沙箱"定位不符，详见 `docs/development-phases.md`）
 
 ## 文档索引

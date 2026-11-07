@@ -471,3 +471,6 @@ fn e2e_inherited_fd_cannot_escape_sandbox() {
 // 收紧为「== 126」，届时 macOS CLI 才能真正区分「策略拒绝」与「程序自己退 1」。
 // 当前 `cmd_run` 走 `spawn(StdioConfig::Inherit)` 拿不到 stderr，属已声明的
 // 能力降级（README「已知限制」+ docs/arch/macos-seatbelt/design.md §10.2）。
+//
+// 与后端无关的 CLI 表面（`--version` / `--help`）在 `tests/cli_meta_test.rs`：
+// 本文件带 `#![cfg(target_os = "macos")]`，放这里 Linux 就测不到。

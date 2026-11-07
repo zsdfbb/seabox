@@ -128,12 +128,13 @@ fn collect_cap_actions(
 #[derive(Parser)]
 #[command(
     name = "seabox",
-    about = "Landlock + seccomp + namespace 沙箱",
+    version,
+    about = "OS 级沙箱（Linux: Landlock + seccomp + namespace / macOS: Seatbelt）",
     args_override_self = true,
     long_about = "\
 为 AI Agent 设计的跨平台 OS 级沙箱。\
  在 OS 层面强制施加文件系统与进程限制，无需容器运行时。\
- 当前支持 Linux（Landlock + seccomp + namespaces），macOS 计划中。
+ 当前支持 Linux（Landlock + seccomp + namespaces）与 macOS（Seatbelt / SBPL）。
 
 核心理念：Agent 每次执行命令都应默认受限。\
  配置一次策略，Agent 自动遵守。
